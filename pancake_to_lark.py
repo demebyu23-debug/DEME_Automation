@@ -97,7 +97,7 @@ def push_to_lark(index: dict, date_str: str, platform: str, channel: str, stats:
         headers=lark_headers(),
         json={"fields": {
             FIELD_TOTAL: float(stats["total"]),
-            FIELD_QC:    str(stats["qc"]),
+            FIELD_QC:    float(stats["qc"]),
         }},
         timeout=10
     ).json()
