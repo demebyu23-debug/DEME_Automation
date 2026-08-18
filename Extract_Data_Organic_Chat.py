@@ -1,24 +1,118 @@
-import csv, time, datetime, requests
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from openpyxl.utils import get_column_letter
+import os, csv, sys, time, datetime, requests
 
-# ── Cấu hình ────────────────────────────────────────────────────
+# ── Cấu hình Pancake ──────────────────────────────────────────
 TZ_VN = datetime.timezone(datetime.timedelta(hours=7))
-
-# Endpoint xác nhận chạy được cho MỌI platform (FB/IG/Zalo, khả năng cao cả TikTok/Shopee)
-# miễn là dùng đúng "Public API access token" riêng của từng page.
 BASE_URL = "https://pages.fm/api/public_api/v1"
+PAGES_CSV = "pages_config_full.csv"   # cột: platform,channel,page_id,access_token
+DELAY_BETWEEN_CALLS = 0.6
 
-PAGES_CSV   = "pages_config_full.csv"    # cột: platform,channel,page_id,access_token
-OUTPUT_XLSX = "chat_stats_output.xlsx"
-DELAY_BETWEEN_CALLS = 0.8
+# ── Cấu hình Lark ─────────────────────────────────────────────
+# Đọc từ biến môi trường (GitHub Secrets) — KHÔNG hardcode trong code
+LARK_CREDS = {
+    "app_id":     os.environ.get("LARK_APP_ID", ""),
+    "app_secret": os.environ.get("LARK_APP_SECRET", ""),
+}
+LARK_APP_TOKEN = "KXMMbFBQRaTdZDsB3Y8lktQygqb"
+LARK_TABLE_ID  = "tblEOk6xCdVd5W8x"
+LARK_URL = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records"
+
+FIELD_DATE     = "Ngày"
+FIELD_PLATFORM = "Nền tảng"
+FIELD_CHANNEL  = "Tên kênh"
+FIELD_TOTAL    = "Tổng hội thoại"   # Number field
+FIELD_QC       = "Quảng cáo"        # Text field -> phải gửi dạng chuỗi
 
 SESSION = requests.Session()
 
+# ── Lark helpers ────────────────────────────────────────────────
+_lark_token, _lark_token_exp = "", 0.0
+
+def get_lark_token() -> str:
+    global _lark_token, _lark_token_exp
+    if time.time() < _lark_token_exp - 300:
+        return _lark_token
+    res = SESSION.post(
+        "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal",
+        json=LARK_CREDS, timeout=10
+    ).json()
+    if "tenant_access_token" not in res:
+        raise RuntimeError(f"Lấy Lark token thất bại — kiểm tra LARK_APP_ID/LARK_APP_SECRET. Response: {res}")
+    _lark_token = res["tenant_access_token"]
+    _lark_token_exp = time.time() + res.get("expire", 7200)
+    return _lark_token
+
+def lark_headers() -> dict:
+    return {"Authorization": f"Bearer {get_lark_token()}"}
+
+def build_date_index(date_str: str) -> dict:
+    """Tải record Lark đúng ngày date_str. Trả về {(platform, channel, dd/mm/yyyy): record_id}."""
+    print(f"📦 Đang tải index Lark cho ngày {date_str}...")
+    index, page_token = {}, ""
+
+    while True:
+        params = {"page_size": 500}
+        if page_token:
+            params["page_token"] = page_token
+
+        res_json = SESSION.get(LARK_URL, headers=lark_headers(), params=params, timeout=15).json()
+        if res_json.get("code") != 0:
+            raise RuntimeError(
+                f"Lark trả lỗi khi tải record: code={res_json.get('code')} msg={res_json.get('msg')}\n"
+                "→ Kiểm tra app đã được cấp quyền truy cập base này chưa."
+            )
+
+        data = res_json.get("data", {})
+        for item in data.get("items", []):
+            f = item["fields"]
+            raw_channel = f.get(FIELD_CHANNEL, "")
+            channel = (raw_channel[0]["text"] if isinstance(raw_channel, list) else str(raw_channel)).strip()
+
+            raw_platform = f.get(FIELD_PLATFORM, "")
+            platform = (raw_platform[0]["text"] if isinstance(raw_platform, list) else str(raw_platform)).strip().lower()
+
+            raw_date = f.get(FIELD_DATE, "")
+            if isinstance(raw_date, (int, float)):
+                d_str = datetime.datetime.fromtimestamp(raw_date / 1000, tz=TZ_VN).strftime("%d/%m/%Y")
+            else:
+                d_str = str(raw_date)
+
+            if channel and platform and d_str == date_str:
+                index[(platform, channel, d_str)] = item["record_id"]
+
+        if not data.get("has_more"):
+            break
+        page_token = data["page_token"]
+
+    print(f"✅ Index xong: {len(index)} dòng.")
+    return index
+
+def push_to_lark(index: dict, date_str: str, platform: str, channel: str, stats: dict) -> bool:
+    record_id = index.get((platform, channel, date_str))
+    if not record_id:
+        print(f"   ⚠️  Không tìm thấy row [{platform}/{channel}] ngày {date_str} trong Lark — bỏ qua.")
+        return False
+
+    res = SESSION.put(
+        f"{LARK_URL}/{record_id}",
+        headers=lark_headers(),
+        json={"fields": {
+            FIELD_TOTAL: float(stats["total"]),
+            FIELD_QC:    str(stats["qc"]),
+        }},
+        timeout=10
+    ).json()
+
+    if res.get("code") == 0:
+        print(f"   ✅ Lark [{platform}/{channel}] {date_str} → Tổng:{stats['total']} QC:{stats['qc']}")
+        return True
+    else:
+        print(f"   ❌ Lark lỗi [{platform}/{channel}]: {res}")
+        return False
+
+# ── Pancake helpers ─────────────────────────────────────────────
 def load_pages(path: str) -> list[dict]:
     pages = []
-    with open(path, newline="", encoding="utf-8") as f:
+    with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
             pages.append({
@@ -29,15 +123,14 @@ def load_pages(path: str) -> list[dict]:
             })
     return pages
 
-def date_to_ts(date_str: str) -> tuple[int, int]:
-    dt = datetime.datetime.strptime(date_str, "%d/%m/%Y").replace(tzinfo=TZ_VN)
+def date_to_ts(d: datetime.date) -> tuple[int, int]:
+    dt = datetime.datetime.combine(d, datetime.time(0, 0, 0), tzinfo=TZ_VN)
     since = int(dt.timestamp())
     until = int(dt.replace(hour=23, minute=59, second=59).timestamp())
     return since, until
 
-def fetch_chat_stats(page_id: str, token: str, date_str: str, retries=3) -> dict | None:
-    """Trả về dict {total, qc, organic} cho 1 page (mọi platform) trong 1 ngày."""
-    since, until = date_to_ts(date_str)
+def fetch_chat_stats(page_id: str, token: str, d: datetime.date, retries=3) -> dict | None:
+    since, until = date_to_ts(d)
     url = f"{BASE_URL}/pages/{page_id}/statistics/ads"
 
     res = None
@@ -94,93 +187,51 @@ def fetch_chat_stats(page_id: str, token: str, date_str: str, retries=3) -> dict
     total_ads_click = sum(r.get("sum_click", 0) for r in ads_data)
 
     organic = max(total_inbox - total_ads_click, 0)
-
     return {"total": total_inbox, "qc": total_ads_click, "organic": organic}
 
 # ── Main ──────────────────────────────────────────────────────
-def run_export():
+def run():
+    if not LARK_CREDS["app_id"] or not LARK_CREDS["app_secret"]:
+        print("🛑 Thiếu LARK_APP_ID / LARK_APP_SECRET trong biến môi trường.")
+        sys.exit(1)
+
     t0 = time.time()
-    yesterday = (datetime.datetime.now(TZ_VN) - datetime.timedelta(days=1)).strftime("%d/%m/%Y")
+    yesterday = (datetime.datetime.now(TZ_VN) - datetime.timedelta(days=1)).date()
+    d_str = yesterday.strftime("%d/%m/%Y")
+    print(f"🚀 Chạy cho ngày: {d_str} (giờ VN)\n")
 
     pages = load_pages(PAGES_CSV)
-    print(f"\n🚀 Xuất dữ liệu ngày: {yesterday} | {len(pages)} kênh\n")
+    index = build_date_index(d_str)
 
-    rows = []
-    ok = fail = 0
+    if not index:
+        print("🛑 Index Lark trống cho ngày này — dừng lại, kiểm tra base/table/quyền truy cập.")
+        sys.exit(1)
 
+    ok = fail = skip = 0
     for i, p in enumerate(pages, start=1):
         channel, platform, page_id, token = p["channel"], p["platform"], p["page_id"], p["access_token"]
         print(f"[{i}/{len(pages)}] 🔄 {channel} ({platform})")
 
         if not token:
-            print("   ⚠️  Thiếu access_token trong CSV — bỏ qua.")
-            rows.append({"channel": channel, "platform": platform, "page_id": page_id,
-                          "total": "", "qc": "", "organic": "", "status": "thiếu access_token"})
+            print("   ⚠️  Thiếu access_token — bỏ qua.")
+            skip += 1
+            continue
+
+        stats = fetch_chat_stats(page_id, token, yesterday)
+        if stats is None:
             fail += 1
         else:
-            stats = fetch_chat_stats(page_id, token, yesterday)
-            if stats is None:
-                rows.append({"channel": channel, "platform": platform, "page_id": page_id,
-                              "total": "", "qc": "", "organic": "", "status": "lỗi fetch"})
-                fail += 1
-            else:
-                print(f"   Tổng: {stats['total']} | QC: {stats['qc']} | Organic: {stats['organic']}")
-                rows.append({"channel": channel, "platform": platform, "page_id": page_id,
-                              "total": stats["total"], "qc": stats["qc"], "organic": stats["organic"],
-                              "status": "ok"})
-                ok += 1
+            success = push_to_lark(index, d_str, platform, channel, stats)
+            ok += 1 if success else 0
+            fail += 0 if success else 1
 
         if i < len(pages):
             time.sleep(DELAY_BETWEEN_CALLS)
 
-    write_xlsx(rows, yesterday, OUTPUT_XLSX)
+    print(f"\n🏁 Xong trong {time.time()-t0:.1f}s | ✅ {ok} thành công | ❌ {fail} thất bại | ⏭️ {skip} bỏ qua (thiếu token)")
 
-    print(f"\n📄 Đã xuất kết quả ra: {OUTPUT_XLSX}")
-    print(f"🏁 Xong trong {time.time()-t0:.1f}s | ✅ {ok} thành công | ❌ {fail} thất bại")
-
-
-def write_xlsx(rows: list[dict], date_str: str, path: str) -> None:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Chat Stats"
-
-    headers = ["Kênh", "Nền tảng", "Page ID", "Tổng hội thoại", "Hội thoại QC", "Hội thoại Organic", "Trạng thái"]
-    ws.append(headers)
-
-    header_font = Font(name="Arial", bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="305496", end_color="305496", fill_type="solid")
-    for col_idx in range(1, len(headers) + 1):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    status_colors = {"ok": "C6EFCE", "thiếu access_token": "FFEB9C", "lỗi fetch": "FFC7CE"}
-
-    for row in rows:
-        ws.append([row["channel"], row["platform"], row["page_id"],
-                   row["total"], row["qc"], row["organic"], row["status"]])
-        r = ws.max_row
-        fill_color = status_colors.get(row["status"], "FFFFFF")
-        fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
-        for col_idx in range(1, len(headers) + 1):
-            cell = ws.cell(row=r, column=col_idx)
-            cell.font = Font(name="Arial")
-            cell.fill = fill
-
-    for col_idx, header in enumerate(headers, start=1):
-        max_len = len(header)
-        for row_idx in range(2, ws.max_row + 1):
-            val = ws.cell(row=row_idx, column=col_idx).value
-            if val is not None:
-                max_len = max(max_len, len(str(val)))
-        ws.column_dimensions[get_column_letter(col_idx)].width = max_len + 4
-
-    ws.freeze_panes = "A2"
-    note_row = ws.max_row + 2
-    ws.cell(row=note_row, column=1, value=f"Dữ liệu ngày: {date_str}").font = Font(name="Arial", italic=True, size=9)
-
-    wb.save(path)
+    if fail > 0:
+        sys.exit(1)  # để GitHub Actions đánh dấu run này là failed, dễ nhận thông báo
 
 if __name__ == "__main__":
-    run_export()
+    run()
