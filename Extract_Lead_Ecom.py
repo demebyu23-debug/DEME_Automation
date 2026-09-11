@@ -1,3 +1,4 @@
+import os
 import json
 import time
 import datetime
@@ -9,8 +10,7 @@ TZ_VN = datetime.timezone(datetime.timedelta(hours=7))
 CSV_FILE = "pages_config_full.csv"
 DELAY_BETWEEN_CALLS = 1.0  # nghỉ giữa mỗi lần gọi API để tránh rate-limit
 
-# Khoảng ngày cần đổ dữ liệu (dd/mm/yyyy). 
-# TỰ ĐỘNG CHỈ LẤY DỮ LIỆU CỦA ĐÚNG NGÀY HÔM QUA
+# TỰ ĐỘNG LẤY NGÀY HÔM QUA CHO CRONJOB
 YESTERDAY_STR = (datetime.datetime.now(TZ_VN) - datetime.timedelta(days=1)).strftime("%d/%m/%Y")
 START_DATE_STR = YESTERDAY_STR
 END_DATE_STR = YESTERDAY_STR
@@ -19,10 +19,8 @@ END_DATE_STR = YESTERDAY_STR
 DRY_RUN = False
 
 # ── PANCAKE ─────────────────────────────────────────────────────
-# DÙNG API PUBLIC ĐỂ DÙNG TOKEN CỦA TỪNG KÊNH TRONG CSV
 BASE_URL = "https://pages.fm/api/public_api/v1"
 
-# Danh sách 5 kênh chuẩn
 CHANNEL_WHITELIST: list[tuple[str, str]] = [
     ("shopee", "DEME_STORE"),
     ("shopee", "Deme By You"),
@@ -32,15 +30,18 @@ CHANNEL_WHITELIST: list[tuple[str, str]] = [
 ]
 
 # ── LARK BASE ───────────────────────────────────────────────────
-LARK_APP_ID = "cli_aa817039ac4bded3"
-LARK_APP_SECRET = "j9zCGmtslYVF8EfegP866bB8fkrKVOgL"  # <-- NHỚ ĐIỀN APP SECRET VÀO ĐÂY
+# Lấy App ID và App Secret từ biến môi trường (dùng cho GitHub Actions)
+LARK_CREDS = {
+    "app_id":     os.environ.get("LARK_APP_ID", ""),
+    "app_secret": os.environ.get("LARK_APP_SECRET", ""),
+}
 
 LARK_BASE_APP_TOKEN = "KXMMbFBQRaTdZDsB3Y8lktQygqb"
 LARK_TABLE_ID = "tbl9EfjuWYr0NCRn"
 
-FIELD_DATE = "Ngày"       # Tên cột Ngày
-FIELD_CHANNEL = "Kênh"    # Tên cột Kênh
-FIELD_LEAD = "Lead"       # Tên cột điền số liệu (Định dạng Number)
+FIELD_DATE = "Ngày"       
+FIELD_CHANNEL = "Kênh"    
+FIELD_LEAD = "Lead"       
 
 SESSION = requests.Session()
 
@@ -66,7 +67,6 @@ def build_channel_page_map(path: str) -> dict[str, dict]:
     df = load_channels(path)
     result = {}
     for _, row in df.iterrows():
-        # Định dạng chuẩn: "Shopee / DEME_STORE"
         label = f"{row['platform'].capitalize()} / {row['channel']}"
         result[label] = {
             "page_id": row["page_id"],
@@ -111,15 +111,19 @@ def fetch_new_customers(page_id: str, token: str, date_str: str, retries=3) -> i
 
 # ── LARK HELPERS ────────────────────────────────────────────────
 def lark_get_tenant_token() -> str:
+    # Cảnh báo sớm nếu chưa set biến môi trường
+    if not LARK_CREDS["app_secret"]:
+        print("⚠️ CẢNH BÁO: Chưa tìm thấy biến môi trường LARK_APP_SECRET!")
+
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
-    res = SESSION.post(url, json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET}, timeout=30)
+    # Ném thẳng cục LARK_CREDS vào json siêu gọn
+    res = SESSION.post(url, json=LARK_CREDS, timeout=30)
     data = res.json()
     if data.get("code") != 0:
         raise RuntimeError(f"Lấy tenant_access_token thất bại: {data}")
     return data["tenant_access_token"]
 
 def lark_list_records(token: str) -> list[dict]:
-    """Lấy tất cả record, giữ nguyên định dạng gốc của cột Ngày (thường là Timestamp ms)."""
     url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_BASE_APP_TOKEN}/tables/{LARK_TABLE_ID}/records"
     headers = {"Authorization": f"Bearer {token}"}
     records = []
@@ -147,11 +151,10 @@ def lark_list_records(token: str) -> list[dict]:
     return records
 
 def tim_record_id(records: list[dict], target_date_str: str, target_kenh: str) -> str:
-    """So khớp Ngày bằng Timestamp và Kênh bằng Text."""
     target_dt = datetime.datetime.strptime(target_date_str, "%d/%m/%Y")
     target_dt_vn = target_dt.replace(tzinfo=TZ_VN)
     target_ts_start = int(target_dt_vn.timestamp() * 1000)
-    target_ts_end   = target_ts_start + 86400000  # + 1 ngày (ms)
+    target_ts_end   = target_ts_start + 86400000 
 
     for rec in records:
         if rec["kenh"].lower() != target_kenh.lower():
@@ -180,7 +183,6 @@ def lark_batch_update(token: str, updates: list[dict]):
     
     for i in range(0, len(updates), 500):
         chunk = updates[i:i + 500]
-        # ÉP KIỂU INT(LEAD) ĐỂ ĐẢM BẢO LARK BASE NHẬN ĐÚNG ĐỊNH DẠNG NUMBER
         body = {"records": [
             {"record_id": u["record_id"], "fields": {FIELD_LEAD: int(u["lead"])}} for u in chunk
         ]}
@@ -235,7 +237,7 @@ def main():
     print(f"\n📊 Tổng: {len(updates)} record đã ghép khớp thành công, {len(missing)} không tìm thấy ô để ghi.")
     
     if DRY_RUN:
-        print("\n🛑 DRY_RUN=True — chưa ghi gì vào Lark. Để ghi thực tế, hãy đổi DRY_RUN = False.")
+        print("\n🛑 DRY_RUN=True — chưa ghi gì vào Lark.")
         return
 
     if updates:
