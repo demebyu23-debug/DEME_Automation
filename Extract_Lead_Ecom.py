@@ -1,5 +1,3 @@
-import os
-import json
 import time
 import datetime
 import requests
@@ -10,17 +8,21 @@ TZ_VN = datetime.timezone(datetime.timedelta(hours=7))
 CSV_FILE = "pages_config_full.csv"
 DELAY_BETWEEN_CALLS = 1.0  # nghỉ giữa mỗi lần gọi API để tránh rate-limit
 
-# TỰ ĐỘNG LẤY NGÀY HÔM QUA CHO CRONJOB
+# Khoảng ngày cần đổ dữ liệu (dd/mm/yyyy).
+# TỰ ĐỘNG CHỈ LẤY DỮ LIỆU CỦA ĐÚNG NGÀY HÔM QUA
 YESTERDAY_STR = (datetime.datetime.now(TZ_VN) - datetime.timedelta(days=1)).strftime("%d/%m/%Y")
 START_DATE_STR = YESTERDAY_STR
 END_DATE_STR = YESTERDAY_STR
 
-# Đã bật thành False để GHI THẲNG VÀO LARK BASE
-DRY_RUN = False
+DRY_RUN = False  # True = chỉ in ra, không ghi vào Lark. Đổi True để chạy thử trước.
 
 # ── PANCAKE ─────────────────────────────────────────────────────
+# Public API chính thức (developer.pancake.biz): /pages/{page_id}/statistics/pages
+# Dùng page_access_token RIÊNG TỪNG TRANG (cột "access_token" trong CSV) — token này
+# không hết hạn theo phiên đăng nhập như session token, nên không cần lo bị 401 do logout.
 BASE_URL = "https://pages.fm/api/public_api/v1"
 
+# Danh sách 5 kênh chuẩn
 CHANNEL_WHITELIST: list[tuple[str, str]] = [
     ("shopee", "DEME_STORE"),
     ("shopee", "Deme By You"),
@@ -30,18 +32,15 @@ CHANNEL_WHITELIST: list[tuple[str, str]] = [
 ]
 
 # ── LARK BASE ───────────────────────────────────────────────────
-# Lấy App ID và App Secret từ biến môi trường (dùng cho GitHub Actions)
-LARK_CREDS = {
-    "app_id":     os.environ.get("LARK_APP_ID", ""),
-    "app_secret": os.environ.get("LARK_APP_SECRET", ""),
-}
+LARK_APP_ID = "cli_aa817039ac4bded3"
+LARK_APP_SECRET = "j9zCGmtslYVF8EfegP866bB8fkrKVOgL"
 
 LARK_BASE_APP_TOKEN = "KXMMbFBQRaTdZDsB3Y8lktQygqb"
 LARK_TABLE_ID = "tbl9EfjuWYr0NCRn"
 
-FIELD_DATE = "Ngày"       
-FIELD_CHANNEL = "Kênh"    
-FIELD_LEAD = "Lead"       
+FIELD_DATE = "Ngày"       # Tên cột Ngày
+FIELD_CHANNEL = "Kênh"    # Tên cột Kênh
+FIELD_LEAD = "Lead"       # Tên cột điền số liệu (Định dạng Number)
 
 SESSION = requests.Session()
 
@@ -63,46 +62,68 @@ def load_channels(path: str) -> pd.DataFrame:
 
     return df
 
-def build_channel_page_map(path: str) -> dict[str, dict]:
+
+def build_channel_page_map(path: str) -> dict[str, tuple[str, str]]:
+    """{'Shopee / DEME_STORE': (page_id, page_access_token), ...}"""
     df = load_channels(path)
     result = {}
     for _, row in df.iterrows():
         label = f"{row['platform'].capitalize()} / {row['channel']}"
-        result[label] = {
-            "page_id": row["page_id"],
-            "access_token": row["access_token"]
-        }
+        result[label] = (row["page_id"], row["access_token"])
     return result
 
+
+def _find_record_list(data) -> list[dict]:
+    """Response chuẩn là {'data': [...], 'success': true}. Xử lý luôn các dạng bọc khác cho chắc."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        if isinstance(data.get("data"), list):
+            return data["data"]
+        for v in data.values():
+            if isinstance(v, list) and v and isinstance(v[0], dict) and (
+                "new_customer_count" in v[0] or "hour" in v[0]
+            ):
+                return v
+    return []
+
+
 def fetch_new_customers(page_id: str, token: str, date_str: str, retries=3) -> int:
+    """GET /pages/{page_id}/statistics/pages -- tổng new_customer_count trong ngày date_str (dd/mm/yyyy).
+    Dùng page_access_token riêng của trang, since/until là Unix timestamp UTC+0."""
     if not token:
-        print(f"   ⚠️ Thiếu access_token cho page {page_id}. Bỏ qua.")
+        print(f"   ⚠️ Thiếu page_access_token cho {page_id} — bỏ qua.")
         return 0
 
-    url = f"{BASE_URL}/pages/{page_id}/statistics/customer_engagements"
-    date_range = f"{date_str} 00:00:00 - {date_str} 23:59:59"
-    params = {"page_access_token": token, "date_range": date_range, "by_hour": "false"}
-    
+    start_vn = datetime.datetime.strptime(date_str, "%d/%m/%Y").replace(tzinfo=TZ_VN)
+    end_vn = start_vn + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
+    since = int(start_vn.timestamp())
+    until = int(end_vn.timestamp())
+
+    url = f"{BASE_URL}/pages/{page_id}/statistics/pages"
+    params = {"page_access_token": token, "since": since, "until": until}
+
     for attempt in range(retries):
         try:
             res = SESSION.get(url, params=params, timeout=30)
+            if res.status_code == 401:
+                print(f"   ❌ 401 Unauthorized cho {page_id} — page_access_token sai/hết quyền.")
+                return 0
+            if res.status_code == 429:
+                time.sleep(10)
+                continue
             if res.status_code != 200:
                 print(f"   ❌ HTTP {res.status_code}: {res.text[:150]}")
-                time.sleep(2)
-                continue
-            
+                if res.status_code >= 500:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                return 0
             data = res.json()
-            if data.get("success") is False:
+            if isinstance(data, dict) and data.get("success") is False:
                 print(f"   ❌ API lỗi: {data}")
                 return 0
-                
-            users = data.get("users_engagements", [])
-            kh_moi = 0
-            for u in users:
-                kh = u.get("new_customer_replied_count") or u.get("new_customer") or 0
-                kh_moi += int(kh)
-            return kh_moi
-
+            records = _find_record_list(data)
+            return sum(int(r.get("new_customer_count", 0) or 0) for r in records)
         except requests.RequestException as e:
             print(f"   ⚠️ Lần {attempt+1}/{retries} lỗi mạng: {e}")
             time.sleep(5 * (attempt + 1))
@@ -111,19 +132,16 @@ def fetch_new_customers(page_id: str, token: str, date_str: str, retries=3) -> i
 
 # ── LARK HELPERS ────────────────────────────────────────────────
 def lark_get_tenant_token() -> str:
-    # Cảnh báo sớm nếu chưa set biến môi trường
-    if not LARK_CREDS["app_secret"]:
-        print("⚠️ CẢNH BÁO: Chưa tìm thấy biến môi trường LARK_APP_SECRET!")
-
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
-    # Ném thẳng cục LARK_CREDS vào json siêu gọn
-    res = SESSION.post(url, json=LARK_CREDS, timeout=30)
+    res = SESSION.post(url, json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET}, timeout=30)
     data = res.json()
     if data.get("code") != 0:
         raise RuntimeError(f"Lấy tenant_access_token thất bại: {data}")
     return data["tenant_access_token"]
 
+
 def lark_list_records(token: str) -> list[dict]:
+    """Lấy tất cả record, giữ nguyên định dạng gốc của cột Ngày (thường là Timestamp ms)."""
     url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_BASE_APP_TOKEN}/tables/{LARK_TABLE_ID}/records"
     headers = {"Authorization": f"Bearer {token}"}
     records = []
@@ -136,29 +154,31 @@ def lark_list_records(token: str) -> list[dict]:
         data = res.json()
         if data.get("code") != 0:
             raise RuntimeError(f"Lark list_records lỗi: {data}")
-            
+
         for item in data["data"]["items"]:
             fields = item.get("fields", {})
             records.append({
                 "record_id": item["record_id"],
-                "ngay_raw": fields.get(FIELD_DATE), 
+                "ngay_raw": fields.get(FIELD_DATE),
                 "kenh": str(fields.get(FIELD_CHANNEL, "")).strip(),
             })
-            
+
         if not data["data"].get("has_more"):
             break
         page_token = data["data"].get("page_token")
     return records
 
-def tim_record_id(records: list[dict], target_date_str: str, target_kenh: str) -> str:
+
+def tim_record_id(records: list[dict], target_date_str: str, target_kenh: str) -> str | None:
+    """So khớp Ngày bằng Timestamp và Kênh bằng Text."""
     target_dt = datetime.datetime.strptime(target_date_str, "%d/%m/%Y")
     target_dt_vn = target_dt.replace(tzinfo=TZ_VN)
     target_ts_start = int(target_dt_vn.timestamp() * 1000)
-    target_ts_end   = target_ts_start + 86400000 
+    target_ts_end = target_ts_start + 86400000  # + 1 ngày (ms)
 
     for rec in records:
         if rec["kenh"].lower() != target_kenh.lower():
-            continue 
+            continue
 
         raw_ngay = rec["ngay_raw"]
         if raw_ngay is None:
@@ -172,15 +192,16 @@ def tim_record_id(records: list[dict], target_date_str: str, target_kenh: str) -
 
         if matched:
             return rec["record_id"]
-            
+
     return None
+
 
 def lark_batch_update(token: str, updates: list[dict]):
     if not updates:
         return
     url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_BASE_APP_TOKEN}/tables/{LARK_TABLE_ID}/records/batch_update"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    
+
     for i in range(0, len(updates), 500):
         chunk = updates[i:i + 500]
         body = {"records": [
@@ -203,6 +224,7 @@ def daterange(start_str: str, end_str: str):
         yield d
         d += datetime.timedelta(days=1)
 
+
 def main():
     channel_page_map = build_channel_page_map(CSV_FILE)
     print(f"✅ {len(channel_page_map)} kênh cần đổ dữ liệu: {list(channel_page_map.keys())}\n")
@@ -214,30 +236,30 @@ def main():
 
     updates = []
     missing = []
-    
+
     for d in daterange(START_DATE_STR, END_DATE_STR):
         date_str = d.strftime("%d/%m/%Y")
         print(f"📅 {date_str}")
 
-        for kenh_label, info in channel_page_map.items():
-            page_id = info["page_id"]
-            page_token = info["access_token"]
-            
+        for kenh_label, (page_id, page_token) in channel_page_map.items():
             kh_moi = fetch_new_customers(page_id, page_token, date_str)
             time.sleep(DELAY_BETWEEN_CALLS)
             print(f"   [{kenh_label}] Khách mới = {kh_moi}")
 
             record_id = tim_record_id(lark_records, date_str, kenh_label)
-            
+
             if record_id:
                 updates.append({"record_id": record_id, "lead": kh_moi})
             else:
                 missing.append((date_str, kenh_label))
 
     print(f"\n📊 Tổng: {len(updates)} record đã ghép khớp thành công, {len(missing)} không tìm thấy ô để ghi.")
-    
+    if missing:
+        for m in missing:
+            print(f"   ⚠️  Không tìm thấy record cho: {m}")
+
     if DRY_RUN:
-        print("\n🛑 DRY_RUN=True — chưa ghi gì vào Lark.")
+        print("\n🛑 DRY_RUN=True — chưa ghi gì vào Lark. Để ghi thực tế, hãy đổi DRY_RUN = False.")
         return
 
     if updates:
