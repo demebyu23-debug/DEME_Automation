@@ -30,4 +30,4 @@ jobs:
         env:
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-        run: python sync_lead_nhan_vien_to_lark.py
+        run: python Fill_lead_ecom.py
