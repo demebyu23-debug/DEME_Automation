@@ -1,7 +1,6 @@
 name: Sync Lead nhan vien ecom to Lark
 
 on:
-  schedule:
   workflow_dispatch:
     inputs:
       target_date:
