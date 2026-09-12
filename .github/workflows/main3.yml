@@ -1,0 +1,39 @@
+name: Sync Lead nhan vien ecom to Lark
+
+on:
+  schedule:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Ngày cần chạy bù (dd/mm/yyyy). Để trống = chạy cho hôm nay."
+        required: false
+        default: ""
+      dry_run:
+        description: "true = chỉ in log, không ghi vào Lark"
+        required: false
+        default: "false"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore pages_config_full.csv from secret
+        run: echo "${{ secrets.PAGES_CONFIG_CSV_B64 }}" | base64 -d > pages_config_full.csv
+
+      - name: Run sync script
+        env:
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          TARGET_DATE: ${{ github.event.inputs.target_date }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: python sync_lead_nhan_vien_to_lark.py
