@@ -10,9 +10,12 @@ TZ_VN = datetime.timezone(datetime.timedelta(hours=7))
 CSV_FILE = os.getenv("PAGES_CONFIG_CSV", "pages_config_full.csv")
 DELAY_BETWEEN_CALLS = 1.0
 
-# Mặc định chỉ chạy cho NGÀY HÔM NAY (phù hợp chạy cron 2 lần/ngày để cập nhật dần trong ngày).
-# Muốn chạy bù cho ngày khác thì set biến môi trường TARGET_DATE (dd/mm/yyyy) khi chạy tay.
-TARGET_DATE_STR = os.getenv("TARGET_DATE", datetime.datetime.now(TZ_VN).strftime("%d/%m/%Y"))
+# Mặc định luôn lấy dữ liệu của NGÀY HÔM QUA (dữ liệu đã chốt đủ cả ngày, không bị thiếu
+# do ngày chưa kết thúc). Muốn chạy bù cho ngày khác thì set biến môi trường TARGET_DATE (dd/mm/yyyy).
+TARGET_DATE_STR = os.getenv(
+    "TARGET_DATE",
+    (datetime.datetime.now(TZ_VN) - datetime.timedelta(days=1)).strftime("%d/%m/%Y"),
+)
 
 # "1"/"true" = chỉ in ra, không ghi vào Lark. Mặc định False để chạy tự động qua cron.
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
