@@ -1,11 +1,6 @@
 name: Sync Lead nhan vien to Lark
 
 on:
-  schedule:
-    # Cron của GitHub Actions chạy theo UTC. VN = UTC+7, nên:
-    # 16:58 VN -> 09:58 UTC | 23:58 VN -> 16:58 UTC
-    - cron: "58 9 * * *"
-    - cron: "58 16 * * *"
   workflow_dispatch:
     inputs:
       target_date:
