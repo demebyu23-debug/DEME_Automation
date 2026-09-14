@@ -7,7 +7,7 @@ import pandas as pd
 
 # ── CẤU HÌNH CHUNG ──────────────────────────────────────────────
 TZ_VN = datetime.timezone(datetime.timedelta(hours=7))
-CSV_FILE = os.getenv("PAGES_CONFIG_CSV", "pages_config_full.csv")
+CSV_FILE = "pages_config_full.csv"  # đọc thẳng từ file commit sẵn trong repo, không qua secret
 DELAY_BETWEEN_CALLS = 1.0
 
 # Mặc định luôn lấy dữ liệu của NGÀY HÔM QUA (dữ liệu đã chốt đủ cả ngày, không bị thiếu
@@ -36,8 +36,8 @@ CHANNEL_WHITELIST: list[tuple[str, str]] = [
 BASE_URL = "https://pages.fm/api/public_api/v1"
 
 # ── LARK BASE ───────────────────────────────────────────────────
-LARK_APP_ID = os.getenv("LARK_APP_ID", "cli_aa817039ac4bded3")
-LARK_APP_SECRET = os.getenv("LARK_APP_SECRET", "")  # BẮT BUỘC set qua biến môi trường/GitHub Secret
+LARK_APP_ID = "cli_aa817039ac4bded3"
+LARK_APP_SECRET = "j9zCGmtslYVF8EfegP866bB8fkrKVOgL"
 
 LARK_BASE_APP_TOKEN = "KXMMbFBQRaTdZDsB3Y8lktQygqb"
 LARK_TABLE_ID = "tblCAIwHiZiW8cFr"   # bảng "Lead theo nhân viên"
@@ -215,9 +215,6 @@ def lark_update_one(token: str, record_id: str, lead: int) -> bool:
 
 # ── MAIN ──────────────────────────────────────────────────────
 def main():
-    if not LARK_APP_SECRET:
-        raise RuntimeError("Thiếu LARK_APP_SECRET — set biến môi trường/GitHub Secret trước khi chạy.")
-
     channels = load_channels(CSV_FILE)
     print(f"🚀 Chạy ngày: {TARGET_DATE_STR} | DRY_RUN={DRY_RUN}")
     print(f"✅ {len(channels)} kênh Shopee/Tiktokshop sẽ được cộng gộp.")
