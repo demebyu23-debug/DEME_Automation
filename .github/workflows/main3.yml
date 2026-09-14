@@ -23,27 +23,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore pages_config_full.csv from secret
-        run: |
-          if [ -z "${{ secrets.PAGES_CONFIG_CSV_B64 }}" ]; then
-            echo "❌ Secret PAGES_CONFIG_CSV_B64 đang trống hoặc chưa được set."
-            echo "   Vào Settings > Secrets and variables > Actions, kiểm tra lại secret này."
-            exit 1
-          fi
-          echo "${{ secrets.PAGES_CONFIG_CSV_B64 }}" | base64 -d > pages_config_full.csv || {
-            echo "❌ Giải mã base64 thất bại — giá trị secret không phải base64 hợp lệ.";
-            exit 1;
-          }
-          if [ ! -s pages_config_full.csv ]; then
-            echo "❌ File pages_config_full.csv sau khi giải mã bị RỖNG."
-            echo "   Kiểm tra lại: giá trị secret phải là kết quả của lệnh base64 encode file CSV,"
-            echo "   không phải dán thẳng nội dung CSV vào secret."
-            exit 1
-          fi
-          echo "✅ Đã khôi phục pages_config_full.csv ($(wc -l < pages_config_full.csv) dòng)."
-
       - name: Run sync script
         env:
-          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: python sync_lead_nhan_vien_to_lark.py
