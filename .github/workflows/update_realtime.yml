@@ -1,0 +1,29 @@
+name: Realtime Follow Lead (10 mins)
+
+on:
+  workflow_dispatch: {}   # Cho phép bấm nút chạy thủ công để test
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run realtime script
+        # Nếu sau này mày dùng os.environ để giấu Secret thì bỏ # ở 3 dòng dưới
+        # env:
+        #   LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+        #   LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+        run: python Follow_lead_realtime.py
