@@ -2,6 +2,8 @@ name: Realtime Follow Lead (10 mins)
 
 on:
   workflow_dispatch: {}          # bấm nút chạy thủ công để test
+  # schedule:
+  #   - cron: "*/10 * * * *"     # bỏ # ở 2 dòng này để tự chạy mỗi 10 phút
 
 concurrency:
   group: follow-lead-realtime
@@ -28,8 +30,15 @@ jobs:
 
       - name: Tạo file cấu hình kênh từ Secret
         env:
-          PAGES_CONFIG_CSV: ${{ secrets.PAGES_CONFIG_CSV }}
-        run: printf '%s\n' "$PAGES_CONFIG_CSV" > pages_config_full.csv
+          PAGES_CONFIG_CSV_B64: ${{ secrets.PAGES_CONFIG_CSV_B64 }}
+        run: |
+          if [ -z "$PAGES_CONFIG_CSV_B64" ]; then
+            echo "::error::Secret PAGES_CONFIG_CSV_B64 trống hoặc chưa tạo"
+            exit 1
+          fi
+          printf '%s' "$PAGES_CONFIG_CSV_B64" | base64 -d | tr -d '\r' > pages_config_full.csv
+          echo "Đã tạo pages_config_full.csv: $(($(wc -l < pages_config_full.csv) - 1)) kênh"
+          head -1 pages_config_full.csv
 
       - name: Run realtime script
         env:
