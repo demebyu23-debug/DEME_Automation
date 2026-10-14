@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: follow-lead-realtime
-  cancel-in-progress: false      # lần trước chưa chạy xong thì lần sau chờ, không chạy chồng
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -28,20 +28,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Tạo file cấu hình kênh từ Secret
-        env:
-          PAGES_CONFIG_CSV_B64: ${{ secrets.PAGES_CONFIG_CSV_B64 }}
-        run: |
-          if [ -z "$PAGES_CONFIG_CSV_B64" ]; then
-            echo "::error::Secret PAGES_CONFIG_CSV_B64 trống hoặc chưa tạo"
-            exit 1
-          fi
-          printf '%s' "$PAGES_CONFIG_CSV_B64" | base64 -d | tr -d '\r' > pages_config_full.csv
-          echo "Đã tạo pages_config_full.csv: $(($(wc -l < pages_config_full.csv) - 1)) kênh"
-          head -1 pages_config_full.csv
-
       - name: Run realtime script
         env:
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          PAGES_CONFIG_CSV_B64: ${{ secrets.PAGES_CONFIG_CSV_B64 }}
           TZ: Asia/Ho_Chi_Minh
         run: python Follow_lead_realtime.py
