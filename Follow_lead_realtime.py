@@ -374,9 +374,10 @@ def main():
         da_khop.add(key)
         fields = {}
 
-        # 1. Lead / KH cũ: ghi khi có dữ liệu (giống code cũ)
-        vals = lead_norm.get(key)
-        if vals:
+        # 1. Lead / KH cũ: LUÔN ghi cho tất cả sale, chưa có dữ liệu hôm nay thì ghi 0
+        vals = lead_norm.get(key) or {"lead_zalo_ca_nhan": 0, "lead_kenh_khac": 0,
+                                      "khcu_zalo_ca_nhan": 0, "khcu_kenh_khac": 0}
+        if True:
             fields.update({
                 FIELD_LEAD_ZALO_RIENG: int(vals["lead_zalo_ca_nhan"]),
                 FIELD_LEAD_KENH_CHUNG: int(vals["lead_kenh_khac"]),
