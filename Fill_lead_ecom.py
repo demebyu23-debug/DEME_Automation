@@ -37,7 +37,7 @@ BASE_URL = "https://pages.fm/api/public_api/v1"
 
 # ── LARK BASE ───────────────────────────────────────────────────
 LARK_APP_ID = "cli_aa817039ac4bded3"
-LARK_APP_SECRET = "j9zCGmtslYVF8EfegP866bB8fkrKVOgL"
+LARK_APP_SECRET = os.getenv("LARK_APP_SECRET")
 
 LARK_BASE_APP_TOKEN = "KXMMbFBQRaTdZDsB3Y8lktQygqb"
 LARK_TABLE_ID = "tblCAIwHiZiW8cFr"   # bảng "Lead theo nhân viên"
