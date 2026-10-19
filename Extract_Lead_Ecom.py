@@ -33,7 +33,7 @@ CHANNEL_WHITELIST: list[tuple[str, str]] = [
 
 # ── LARK BASE ───────────────────────────────────────────────────
 LARK_APP_ID = "cli_aa817039ac4bded3"
-LARK_APP_SECRET = "j9zCGmtslYVF8EfegP866bB8fkrKVOgL"
+LARK_APP_SECRET = os.getenv("LARK_APP_SECRET")
 
 LARK_BASE_APP_TOKEN = "KXMMbFBQRaTdZDsB3Y8lktQygqb"
 LARK_TABLE_ID = "tbl9EfjuWYr0NCRn"
