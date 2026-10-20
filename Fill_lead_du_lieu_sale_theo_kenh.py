@@ -30,9 +30,9 @@ BASE_URL = "https://pages.fm/api/public_api/v1"
 
 # ── LARK BASE ───────────────────────────────────────────────────
 LARK_APP_ID = os.getenv("LARK_APP_ID")
-LARK_APP_SECRET = os.getenv("LARK_APP_SECRET")   
-LARK_BASE_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN")
-LARK_TABLE_ID = os.getenv("LARK_TABLE_ID")
+LARK_APP_SECRET = os.getenv("LARK_APP_SECRET")   # BẮT BUỘC: set qua biến môi trường / GitHub Secret
+LARK_BASE_APP_TOKEN = "F89WbHMWOaoPDWsUrAHlLhN9gPb"
+LARK_TABLE_ID = "tblkkaGsuLkKbSL7"
 
 FIELD_MONTH = "Tháng"        # text dạng "9.2026"
 FIELD_PROJECT = "Dự án"
