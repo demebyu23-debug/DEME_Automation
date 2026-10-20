@@ -48,10 +48,10 @@ LOC_THEO_CA = False       # False = điền cho TẤT CẢ sale có trong bảng
 XOA_NGOAI_CA = False      # True = sale ngoài ca bị xóa trống ô "Số hội thoại chưa phản hồi"
 
 # ── LARK BASE ───────────────────────────────────────────────────
-LARK_APP_ID = "cli_aa817039ac4bded3"
+LARK_APP_ID = os.getenv("LARK_APP_ID")
 LARK_APP_SECRET = os.getenv("LARK_APP_SECRET")   # để trong file .env, KHÔNG ghi thẳng vào code
 
-LARK_BASE_APP_TOKEN = "KXMMbFBQRaTdZDsB3Y8lktQygqb"
+LARK_BASE_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN")
 LARK_TABLE_ID = "tblWpT0rJOIiLpmP"
 
 FIELD_MATCH = "Tên TK POS"
