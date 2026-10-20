@@ -203,7 +203,7 @@ def run():
         print("🛑 Thiếu LARK_APP_ID / LARK_APP_SECRET trong biến môi trường.")
         sys.exit(1)
     if not LARK_APP_TOKEN or not LARK_TABLE_ID:
-        print("🛑 Thiếu LARK_BASE_APP_TOKEN / LARK_TABLE_ID_CHAT trong biến môi trường.")
+        print("🛑 Thiếu LARK_APP_TOKEN trong biến môi trường (kiểm tra secret và phần env trong file yml).")
         sys.exit(1)
  
     t0 = time.time()
@@ -244,7 +244,5 @@ def run():
     if fail > 0:
         sys.exit(1)  # để GitHub Actions đánh dấu run này là failed, dễ nhận thông báo
  
-if __name__ == "__main__":
-    run()
 if __name__ == "__main__":
     run()
