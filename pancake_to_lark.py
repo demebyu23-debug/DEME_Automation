@@ -12,7 +12,7 @@ LARK_CREDS = {
     "app_id":     os.environ.get("LARK_APP_ID", ""),
     "app_secret": os.environ.get("LARK_APP_SECRET", ""),
 }
-LARK_APP_TOKEN = "KXMMbFBQRaTdZDsB3Y8lktQygqb"
+LARK_APP_TOKEN = os.environ.get("LARK_APP_TOKEN", "")
 LARK_TABLE_ID  = "tblEOk6xCdVd5W8x"
 LARK_URL = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records"
 
