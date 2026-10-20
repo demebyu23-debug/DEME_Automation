@@ -28,9 +28,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Tạo file cấu hình từ Secret
+        env:
+          PAGES_CSV_B64: ${{ secrets.PAGES_CONFIG_CSV_B64 }}
+        run: |
+          if [ -z "$PAGES_CSV_B64" ]; then
+            echo "Thiếu secret PAGES_CONFIG_CSV_B64"
+            exit 1
+          fi
+          echo "$PAGES_CSV_B64" | base64 -d > pages_config_full.csv
+          echo "Đã tạo pages_config_full.csv: $(wc -l < pages_config_full.csv) dòng"
+
       - name: Run realtime script
         env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
-          PAGES_CONFIG_CSV_B64: ${{ secrets.PAGES_CONFIG_CSV_B64 }}
+          PERSONAL_ZALO_PAGE_IDS: ${{ secrets.PERSONAL_ZALO_PAGE_IDS }}
           TZ: Asia/Ho_Chi_Minh
         run: python Follow_lead_realtime.py
