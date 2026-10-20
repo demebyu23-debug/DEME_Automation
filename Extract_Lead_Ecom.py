@@ -2,6 +2,7 @@ import time
 import datetime
 import requests
 import pandas as pd
+import os
 
 # ── CẤU HÌNH CHUNG ──────────────────────────────────────────────
 TZ_VN = datetime.timezone(datetime.timedelta(hours=7))
