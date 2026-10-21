@@ -2,9 +2,13 @@ name: Daily Pancake Chat Stats Sync
 
 on:
   schedule:
-    # 20:00 UTC = 03:00 giờ VN (UTC+7) hôm sau
     - cron: '0 20 * * *'
-  workflow_dispatch: {}   # cho phép bấm chạy tay để test từ tab Actions trên GitHub
+  workflow_dispatch:
+    inputs:
+      run_date:
+        description: 'Ngày chạy bù (dd/mm/yyyy), để trống = hôm qua'
+        required: false
+        default: ''
 
 jobs:
   sync:
@@ -37,4 +41,5 @@ jobs:
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
           LARK_BASE_APP_TOKEN: ${{ secrets.LARK_BASE_APP_TOKEN }}
+          RUN_DATE: ${{ github.event.inputs.run_date }}
         run: python pancake_to_lark.py
