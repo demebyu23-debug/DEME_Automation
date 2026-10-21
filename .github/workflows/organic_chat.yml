@@ -1,0 +1,59 @@
+name: Auto Extract Organic Chat
+
+on:
+  schedule:
+    # 20:00 UTC = 03:00 sáng giờ Việt Nam (UTC+7). Nên lệch giờ với các workflow Pancake khác 15–30 phút.
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: 'Chạy bù TỪ ngày (dd/mm/yyyy). Để trống = chỉ chạy hôm qua'
+        required: false
+        default: ''
+      date_to:
+        description: 'ĐẾN ngày (dd/mm/yyyy). Để trống = đến hôm qua'
+        required: false
+        default: ''
+
+concurrency:
+  group: organic-chat
+  cancel-in-progress: false
+
+jobs:
+  sync-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Tạo file cấu hình từ Secret
+        env:
+          PAGES_CSV_B64: ${{ secrets.PAGES_CONFIG_CSV_B64 }}
+        run: |
+          if [ -z "$PAGES_CSV_B64" ]; then
+            echo "Thiếu secret PAGES_CONFIG_CSV_B64"
+            exit 1
+          fi
+          echo "$PAGES_CSV_B64" | base64 -d > pages_config_full.csv
+          echo "Đã tạo pages_config_full.csv: $(wc -l < pages_config_full.csv) dòng"
+
+      - name: Run Extract Script
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          RUN_DATE_FROM: ${{ github.event.inputs.date_from }}
+          RUN_DATE_TO: ${{ github.event.inputs.date_to }}
+          TZ: Asia/Ho_Chi_Minh
+        run: python Extract_Data_Organic_Chat.py
