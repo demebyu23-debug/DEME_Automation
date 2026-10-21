@@ -18,8 +18,10 @@ from dotenv import load_dotenv
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-PANCAKE_API_KEY = os.getenv("PANCAKE_API_KEY")
-PANCAKE_SHOP_ID = "1320043"
+# Đọc từ biến môi trường (GitHub Secrets) — KHÔNG hardcode trong code
+# Cần 5 secret: PANCAKE_API_KEY, PANCAKE_SHOP_ID, LARK_APP_ID, LARK_APP_SECRET, LARK_BASE_APP_TOKEN_KE_TOAN
+PANCAKE_API_KEY = os.getenv("PANCAKE_API_KEY", "").strip()
+PANCAKE_SHOP_ID = os.getenv("PANCAKE_SHOP_ID", "").strip()
 
 # ================== CẤU HÌNH ==================
 SO_NGAY_QUET = 3           # quét đơn cập nhật trong N ngày gần nhất
@@ -35,10 +37,10 @@ DRY_RUN = False            # True = chỉ in ra, không ghi Lark
 PAGE_SIZE = 500
 SO_TRANG_SONG_SONG = 4
 
-LARK_APP_ID = "cli_aa817039ac4bded3"
-LARK_APP_SECRET = os.getenv("LARK_APP_SECRET")
-LARK_APP_TOKEN = "Cr25bE0NXaUl99s6oaBl4qbqgOg"
-LARK_TABLE_ID = "tblsfYXNulnB8aen"
+LARK_APP_ID = os.getenv("LARK_APP_ID", "").strip()
+LARK_APP_SECRET = os.getenv("LARK_APP_SECRET", "").strip()
+LARK_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN_KE_TOAN", "").strip()   # base Kế toán, KHÁC base Sale
+LARK_TABLE_ID = os.getenv("LARK_TABLE_ID_KE_TOAN", "").strip() or "tblsfYXNulnB8aen"
 LARK = "https://open.larksuite.com/open-apis"
 
 # Tên cột trên Lark (đúng như bảng Kế toán 2026)
@@ -110,7 +112,7 @@ def tai_trang(page, start_ts, end_ts):
                 return r.json()
             print(f"  trang {page}: HTTP {r.status_code}, thử lại...")
         except requests.exceptions.RequestException as e:
-            print(f"  trang {page}: lỗi mạng {e}, thử lại...")
+            print(f"  trang {page}: lỗi mạng {type(e).__name__}, thử lại...")
         time.sleep(3 * (attempt + 1))
     print(f"  !! Bỏ qua trang {page} sau 3 lần lỗi")
     return {}
@@ -266,8 +268,11 @@ def them_moi(h, records):
 # ===================== MAIN =====================
 def main():
     t0 = time.time()
-    if not LARK_APP_SECRET:
-        raise SystemExit("!! Thiếu LARK_APP_SECRET trong file .env")
+    thieu = [k for k, v in {"PANCAKE_API_KEY": PANCAKE_API_KEY, "PANCAKE_SHOP_ID": PANCAKE_SHOP_ID,
+                            "LARK_APP_ID": LARK_APP_ID, "LARK_APP_SECRET": LARK_APP_SECRET,
+                            "LARK_BASE_APP_TOKEN_KE_TOAN": LARK_APP_TOKEN}.items() if not v]
+    if thieu:
+        raise SystemExit(f"🛑 Thiếu biến môi trường: {', '.join(thieu)} (kiểm tra secret và phần env trong file yml).")
     h = lark_headers()
     types = loai_cot(h)
     if COT["id"] not in types:
@@ -299,8 +304,10 @@ def main():
         records.append({"fields": f})
 
     if DRY_RUN:
-        print("[DRY_RUN] Chưa ghi. Mẫu 1 dòng:")
-        print(json.dumps(records[:1], ensure_ascii=False, indent=2))
+        print("[DRY_RUN] Chưa ghi.")
+        # Mẫu dòng có tên, SĐT, MST khách -> chỉ in khi chạy trên máy, không in lên log GitHub (repo public)
+        if not os.getenv("GITHUB_ACTIONS"):
+            print(json.dumps(records[:1], ensure_ascii=False, indent=2))
         return
     ok = them_moi(h, records)
     print(f"✅ Đã thêm {ok}/{len(records)} dòng (mất {time.time() - t0:.0f} giây)")
