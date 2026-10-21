@@ -17,8 +17,10 @@ LARK_APP_TOKEN = os.environ.get("LARK_BASE_APP_TOKEN", "").strip()
 LARK_TABLE_ID  = "tblEOk6xCdVd5W8x"
 LARK_URL = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records"
 
-# Chạy bù cho ngày cụ thể: đặt biến RUN_DATE = dd/mm/yyyy. Để trống = chạy cho hôm qua.
-RUN_DATE = os.environ.get("RUN_DATE", "").strip()
+# Chạy bù: đặt RUN_DATE_FROM và RUN_DATE_TO (dd/mm/yyyy). Chỉ đặt FROM = chạy từ ngày đó đến hôm qua.
+# Để trống cả hai = chạy cho hôm qua (lịch hằng ngày).
+RUN_DATE_FROM = os.environ.get("RUN_DATE_FROM", "").strip()
+RUN_DATE_TO   = os.environ.get("RUN_DATE_TO", "").strip()
 
 FIELD_DATE     = "Ngày"
 FIELD_PLATFORM = "Nền tảng"
@@ -58,17 +60,17 @@ def lark_json(res: requests.Response) -> dict:
             f"table ID = {len(LARK_TABLE_ID)} (đúng là 16)"
         )
 
-def build_date_index(date_str: str) -> dict:
-    """Tải record Lark đúng ngày date_str. Trả về {(platform, channel): record_id}."""
-    print(f"📦 Đang tải index Lark cho ngày {date_str}...")
-    index, page_token = {}, ""
+def build_index() -> dict:
+    """Tải toàn bộ record Lark một lần. Trả về {dd/mm/yyyy: {(platform, channel): record_id}}."""
+    print("📦 Đang tải dữ liệu bảng Lark...")
+    index, page_token, total = {}, "", 0
 
     while True:
         params = {"page_size": 500}
         if page_token:
             params["page_token"] = page_token
 
-        res_json = lark_json(SESSION.get(LARK_URL, headers=lark_headers(), params=params, timeout=15))
+        res_json = lark_json(SESSION.get(LARK_URL, headers=lark_headers(), params=params, timeout=30))
         if res_json.get("code") != 0:
             raise RuntimeError(
                 f"Lark trả lỗi khi tải record: code={res_json.get('code')} msg={res_json.get('msg')}\n"
@@ -77,6 +79,7 @@ def build_date_index(date_str: str) -> dict:
 
         data = res_json.get("data", {})
         for item in data.get("items", []) or []:
+            total += 1
             f = item["fields"]
             raw_channel = f.get(FIELD_CHANNEL, "")
             channel = (raw_channel[0]["text"] if isinstance(raw_channel, list) else str(raw_channel)).strip()
@@ -90,14 +93,14 @@ def build_date_index(date_str: str) -> dict:
             else:
                 d_str = str(raw_date)
 
-            if channel and platform and d_str == date_str:
-                index[(platform, channel)] = item["record_id"]
+            if channel and platform and d_str:
+                index.setdefault(d_str, {})[(platform, channel)] = item["record_id"]
 
         if not data.get("has_more"):
             break
         page_token = data["page_token"]
 
-    print(f"✅ Lark đã có sẵn {len(index)} dòng cho ngày này.\n")
+    print(f"✅ Đã tải {total} dòng từ Lark.\n")
     return index
 
 def lark_batch(action: str, records: list[dict]) -> int:
@@ -186,25 +189,25 @@ def fetch_chat_stats(page_id: str, token: str, d: datetime.date, retries=3) -> d
     return {"total": total_inbox, "qc": total_ads_click}
 
 # ── Main ──────────────────────────────────────────────────────
-def run():
-    if not LARK_CREDS["app_id"] or not LARK_CREDS["app_secret"]:
-        print("🛑 Thiếu LARK_APP_ID / LARK_APP_SECRET trong biến môi trường.")
-        sys.exit(1)
-    if not LARK_APP_TOKEN:
-        print("🛑 Thiếu LARK_BASE_APP_TOKEN trong biến môi trường (kiểm tra secret và phần env trong file yml).")
-        sys.exit(1)
+def parse_date(x: str) -> datetime.date:
+    return datetime.datetime.strptime(x, "%d/%m/%Y").date()
 
-    t0 = time.time()
-    if RUN_DATE:
-        run_day = datetime.datetime.strptime(RUN_DATE, "%d/%m/%Y").date()
-    else:
-        run_day = (datetime.datetime.now(TZ_VN) - datetime.timedelta(days=1)).date()
+def get_days() -> list[datetime.date]:
+    yesterday = (datetime.datetime.now(TZ_VN) - datetime.timedelta(days=1)).date()
+    if not RUN_DATE_FROM and not RUN_DATE_TO:
+        return [yesterday]
+    start = parse_date(RUN_DATE_FROM) if RUN_DATE_FROM else parse_date(RUN_DATE_TO)
+    end = parse_date(RUN_DATE_TO) if RUN_DATE_TO else yesterday
+    if start > end:
+        print(f"🛑 Ngày bắt đầu {start:%d/%m/%Y} sau ngày kết thúc {end:%d/%m/%Y}.")
+        sys.exit(1)
+    return [start + datetime.timedelta(days=i) for i in range((end - start).days + 1)]
+
+def run_one_day(run_day: datetime.date, pages: list[dict], day_index: dict) -> tuple[int, int, int, int]:
+    """Chạy cho 1 ngày. Trả về (tạo mới, cập nhật, thất bại, thiếu token)."""
     d_str = run_day.strftime("%d/%m/%Y")
     day_ms = date_to_ts(run_day)[0] * 1000   # giá trị cột Ngày (timestamp ms, 0h giờ VN)
-    print(f"🚀 Chạy cho ngày: {d_str} (giờ VN)\n")
-
-    pages = load_pages(PAGES_CSV)
-    index = build_date_index(d_str)
+    print(f"\n════════ 📅 {d_str} — Lark đã có sẵn {len(day_index)} dòng ════════")
 
     to_create, to_update = [], []
     fail = skip = 0
@@ -223,14 +226,13 @@ def run():
                 fail += 1
             else:
                 print(f"   Tổng:{stats['total']} QC:{stats['qc']}")
-            if i < len(pages):
-                time.sleep(DELAY_BETWEEN_CALLS)
+            time.sleep(DELAY_BETWEEN_CALLS)
 
         stat_fields = {}
         if stats is not None:
             stat_fields = {FIELD_TOTAL: float(stats["total"]), FIELD_QC: float(stats["qc"])}
 
-        record_id = index.get((platform, channel))
+        record_id = day_index.get((platform, channel))
         if record_id:
             if stat_fields:
                 to_update.append({"record_id": record_id, "fields": stat_fields})
@@ -242,17 +244,38 @@ def run():
                 **stat_fields,
             }})
 
-    print(f"\n📝 Ghi vào Lark: tạo mới {len(to_create)} dòng, cập nhật {len(to_update)} dòng...")
     created = lark_batch("batch_create", to_create) if to_create else 0
     updated = lark_batch("batch_update", to_update) if to_update else 0
     fail += (len(to_create) - created) + (len(to_update) - updated)
+    print(f"📝 {d_str}: 🆕 tạo {created} | ✅ cập nhật {updated} | ❌ {fail} thất bại | ⏭️ {skip} thiếu token")
+    return created, updated, fail, skip
+
+def run():
+    if not LARK_CREDS["app_id"] or not LARK_CREDS["app_secret"]:
+        print("🛑 Thiếu LARK_APP_ID / LARK_APP_SECRET trong biến môi trường.")
+        sys.exit(1)
+    if not LARK_APP_TOKEN:
+        print("🛑 Thiếu LARK_BASE_APP_TOKEN trong biến môi trường (kiểm tra secret và phần env trong file yml).")
+        sys.exit(1)
+
+    t0 = time.time()
+    days = get_days()
+    print(f"🚀 Chạy cho {len(days)} ngày: {days[0]:%d/%m/%Y} → {days[-1]:%d/%m/%Y} (giờ VN)\n")
+
+    pages = load_pages(PAGES_CSV)
+    index = build_index()
+
+    tot_c = tot_u = tot_f = tot_s = 0
+    for d in days:
+        c, u, f, s_ = run_one_day(d, pages, index.get(d.strftime("%d/%m/%Y"), {}))
+        tot_c += c; tot_u += u; tot_f += f; tot_s += s_
 
     print(
-        f"\n🏁 Xong trong {time.time()-t0:.1f}s | 🆕 tạo {created} | ✅ cập nhật {updated} "
-        f"| ❌ {fail} thất bại | ⏭️ {skip} thiếu token"
+        f"\n🏁 Xong {len(days)} ngày trong {time.time()-t0:.1f}s | 🆕 tạo {tot_c} | ✅ cập nhật {tot_u} "
+        f"| ❌ {tot_f} thất bại | ⏭️ {tot_s} lượt thiếu token"
     )
 
-    if fail > 0:
+    if tot_f > 0:
         sys.exit(1)  # để GitHub Actions đánh dấu run này là failed, dễ nhận thông báo
 
 if __name__ == "__main__":
