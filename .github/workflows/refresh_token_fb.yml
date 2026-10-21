@@ -1,0 +1,39 @@
+name: Refresh Meta Token
+
+# Đổi token Meta mới mỗi tháng và lưu lại vào secret LONG_LIVED_TOKEN.
+# Token Meta hết hạn sau ~60 ngày: workflow này KHÔNG được bỏ lượt quá 1 lần liên tiếp.
+on:
+  schedule:
+    - cron: '0 22 1 * *'   # 22:00 UTC ngày 1 hằng tháng = 05:00 sáng ngày 2 giờ VN
+  workflow_dispatch: {}
+
+concurrency:
+  group: meta-refresh-token
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pynacl
+
+      - name: Refresh token and update secret
+        env:
+          LONG_LIVED_TOKEN: ${{ secrets.LONG_LIVED_TOKEN }}
+          META_APP_ID: '1642947633648644'
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: python meta_to_lark.py refresh

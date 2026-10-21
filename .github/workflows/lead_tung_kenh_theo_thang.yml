@@ -49,4 +49,4 @@ jobs:
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
           BACKFILL_FROM: ${{ github.event.inputs.backfill_from }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-        run: python daily_lead.py
+        run: python lead_tung_kenh_theo_thang.py

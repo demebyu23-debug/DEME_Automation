@@ -48,4 +48,4 @@ jobs:
           LARK_BASE_APP_TOKEN: ${{ secrets.LARK_BASE_APP_TOKEN }}
           RUN_DATE_FROM: ${{ github.event.inputs.date_from }}
           RUN_DATE_TO: ${{ github.event.inputs.date_to }}
-        run: python Extract_Lead_Ecom.py
+        run: python lead_kenh_ecom.py

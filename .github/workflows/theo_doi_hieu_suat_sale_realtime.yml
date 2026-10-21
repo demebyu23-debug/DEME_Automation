@@ -1,39 +1,29 @@
-name: Auto Extract Organic Chat
+name: Realtime Follow Lead (10 mins)
 
 on:
-  schedule:
-    # 20:00 UTC = 03:00 sáng giờ Việt Nam (UTC+7). Nên lệch giờ với các workflow Pancake khác 15–30 phút.
-    - cron: "0 20 * * *"
-  workflow_dispatch:
-    inputs:
-      date_from:
-        description: 'Chạy bù TỪ ngày (dd/mm/yyyy). Để trống = chỉ chạy hôm qua'
-        required: false
-        default: ''
-      date_to:
-        description: 'ĐẾN ngày (dd/mm/yyyy). Để trống = đến hôm qua'
-        required: false
-        default: ''
+  workflow_dispatch: {}          # bấm nút chạy thủ công để test
+  # schedule:
+  #   - cron: "*/10 * * * *"     # bỏ # ở 2 dòng này để tự chạy mỗi 10 phút
 
 concurrency:
-  group: organic-chat
+  group: follow-lead-realtime
   cancel-in-progress: false
 
 jobs:
-  sync-data:
+  sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    timeout-minutes: 15
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -49,11 +39,11 @@ jobs:
           echo "$PAGES_CSV_B64" | base64 -d > pages_config_full.csv
           echo "Đã tạo pages_config_full.csv: $(wc -l < pages_config_full.csv) dòng"
 
-      - name: Run Extract Script
+      - name: Run realtime script
         env:
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
-          RUN_DATE_FROM: ${{ github.event.inputs.date_from }}
-          RUN_DATE_TO: ${{ github.event.inputs.date_to }}
+          LARK_BASE_APP_TOKEN: ${{ secrets.LARK_BASE_APP_TOKEN }}
+          PERSONAL_ZALO_PAGE_IDS: ${{ secrets.PERSONAL_ZALO_PAGE_IDS }}
           TZ: Asia/Ho_Chi_Minh
-        run: python Extract_Data_Organic_Chat.py
+        run: python theo_doi_hieu_suat_sale_realtime.py

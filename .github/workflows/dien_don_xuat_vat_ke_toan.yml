@@ -36,4 +36,4 @@ jobs:
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
           LARK_BASE_APP_TOKEN_KE_TOAN: ${{ secrets.LARK_BASE_APP_TOKEN_KE_TOAN }}
           TZ: Asia/Ho_Chi_Minh
-        run: python Push_Vat_Ke_Toan.py
+        run: python dien_don_xuat_vat_ke_toan.py

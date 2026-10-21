@@ -1,0 +1,34 @@
+name: Daily Meta to Lark Sync
+
+on:
+  schedule:
+    # 20:00 UTC = 03:00 sáng giờ VN. GitHub thường chạy trễ vài tiếng -> thực tế khoảng 06:00-07:00.
+    - cron: '0 20 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: meta-daily-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Meta sync
+        env:
+          LONG_LIVED_TOKEN: ${{ secrets.LONG_LIVED_TOKEN }}
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+        run: python meta_to_lark.py sync

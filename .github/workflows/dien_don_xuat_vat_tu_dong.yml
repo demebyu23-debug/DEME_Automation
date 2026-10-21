@@ -36,4 +36,4 @@ jobs:
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
           LARK_BASE_APP_TOKEN: ${{ secrets.LARK_BASE_APP_TOKEN }}
           TZ: Asia/Ho_Chi_Minh
-        run: python sync_pancake_orders.py
+        run: python dien_don_xuat_vat_tu_dong.py

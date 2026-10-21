@@ -1,0 +1,25 @@
+# ── Thông tin nhạy cảm: KHÔNG BAO GIỜ đưa lên repo ──
+# File cấu hình kênh (chứa access_token Pancake) - workflow tự tạo từ secret
+*.csv
+# Biến môi trường khi chạy trên máy (Lark secret, Pancake API key...)
+.env
+.env.*
+# Token Meta
+token_store.json
+
+# File xuất dữ liệu (có thể chứa tên, SĐT, MST khách hàng)
+*.xlsx
+*.xls
+*.log
+
+# ── Python ──
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ── Máy tính / trình soạn thảo ──
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
