@@ -36,4 +36,4 @@ jobs:
           META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           REPO: ${{ github.repository }}
-        run: python meta_to_lark.py refresh
+        run: python lead_meta_ads_fb_mkt.py refresh
