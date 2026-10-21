@@ -1,8 +1,9 @@
+import os
+import sys
 import time
 import datetime
 import requests
 import pandas as pd
-import os
 
 # ── CẤU HÌNH CHUNG ──────────────────────────────────────────────
 TZ_VN = datetime.timezone(datetime.timedelta(hours=7))
@@ -33,11 +34,13 @@ CHANNEL_WHITELIST: list[tuple[str, str]] = [
 ]
 
 # ── LARK BASE ───────────────────────────────────────────────────
-LARK_APP_ID = os.getenv("LARK_APP_ID")
-LARK_APP_SECRET = os.getenv("LARK_APP_SECRET")
+# Đọc từ biến môi trường (GitHub Secrets) — KHÔNG hardcode trong code
+# Cần 3 secret: LARK_APP_ID, LARK_APP_SECRET, LARK_BASE_APP_TOKEN
+LARK_APP_ID = os.getenv("LARK_APP_ID", "").strip()
+LARK_APP_SECRET = os.getenv("LARK_APP_SECRET", "").strip()
 
-LARK_BASE_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN")
-LARK_TABLE_ID = os.getenv("LARK_TABLE_ID")
+LARK_BASE_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN", "").strip()
+LARK_TABLE_ID = os.getenv("LARK_TABLE_ID_LEAD", "").strip() or "tbl9EfjuWYr0NCRn"  # bảng Lead Ecom
 
 FIELD_DATE = "Ngày"       # Tên cột Ngày
 FIELD_CHANNEL = "Kênh"    # Tên cột Kênh
@@ -227,6 +230,13 @@ def daterange(start_str: str, end_str: str):
 
 
 def main():
+    if not LARK_APP_ID or not LARK_APP_SECRET:
+        print("🛑 Thiếu LARK_APP_ID / LARK_APP_SECRET trong biến môi trường.")
+        sys.exit(1)
+    if not LARK_BASE_APP_TOKEN:
+        print("🛑 Thiếu LARK_BASE_APP_TOKEN trong biến môi trường (kiểm tra secret và phần env trong file yml).")
+        sys.exit(1)
+
     channel_page_map = build_channel_page_map(CSV_FILE)
     print(f"✅ {len(channel_page_map)} kênh cần đổ dữ liệu: {list(channel_page_map.keys())}\n")
 
