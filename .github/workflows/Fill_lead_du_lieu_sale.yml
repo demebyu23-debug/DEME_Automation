@@ -1,0 +1,52 @@
+name: Daily Pancake Lead to Lark (theo tháng)
+
+on:
+  schedule:
+    - cron: "0 23 * * *"   # 23:00 UTC = 06:00 sáng giờ Việt Nam
+  workflow_dispatch:
+    inputs:
+      backfill_from:
+        description: "Chạy bù từ tháng (M.YYYY, ví dụ 1.2024). Để trống = chạy hằng ngày"
+        required: false
+        default: ""
+      dry_run:
+        description: "true = chỉ in, không ghi vào Lark"
+        required: false
+        default: "false"
+
+concurrency:
+  group: daily-lead-thang
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Tạo pages_config_full_2.csv từ Secret
+        env:
+          PAGES_CSV_2_B64: ${{ secrets.PAGES_CONFIG_CSV_2_B64 }}
+        run: |
+          if [ -z "$PAGES_CSV_2_B64" ]; then
+            echo "Thiếu secret PAGES_CONFIG_CSV_2_B64"
+            exit 1
+          fi
+          echo "$PAGES_CSV_2_B64" | base64 -d > pages_config_full_2.csv
+          echo "Đã tạo pages_config_full_2.csv: $(wc -l < pages_config_full_2.csv) dòng"
+
+      - name: Run
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          BACKFILL_FROM: ${{ github.event.inputs.backfill_from }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: python daily_lead.py
