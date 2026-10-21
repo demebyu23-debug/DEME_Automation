@@ -9,13 +9,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-PANCAKE_API_KEY = os.getenv("PANCAKE_API_KEY")
-PANCAKE_SHOP_ID = "1320043"
-LARK_APP_SECRET = os.getenv("LARK_APP_SECRET")
-
-LARK_APP_ID = "cli_aa817039ac4bded3"
-LARK_APP_TOKEN = "KXMMbFBQRaTdZDsB3Y8lktQygqb"
-LARK_TABLE_ID = "tblBzXKFjP0eIy8s"
+# Đọc từ biến môi trường (GitHub Secrets) — KHÔNG hardcode trong code
+# Cần 5 secret: PANCAKE_API_KEY, PANCAKE_SHOP_ID, LARK_APP_ID, LARK_APP_SECRET, LARK_BASE_APP_TOKEN
+PANCAKE_API_KEY = os.getenv("PANCAKE_API_KEY", "").strip()
+PANCAKE_SHOP_ID = os.getenv("PANCAKE_SHOP_ID", "").strip()
+LARK_APP_ID = os.getenv("LARK_APP_ID", "").strip()
+LARK_APP_SECRET = os.getenv("LARK_APP_SECRET", "").strip()
+LARK_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN", "").strip()
+LARK_TABLE_ID = os.getenv("LARK_TABLE_ID_ORDERS", "").strip() or "tblBzXKFjP0eIy8s"
 
 COL_MUC_ME = "Các mục mẹ"
 MAX_RETRIES = 3
@@ -65,7 +66,7 @@ def request_with_retry(method, url, **kwargs):
             else:
                 print(f"    [HTTP {resp.status_code}] thử lại ({attempt}/{MAX_RETRIES})...")
         except requests.exceptions.RequestException as e:
-            print(f"    [Lỗi mạng] {e} - thử lại ({attempt}/{MAX_RETRIES})...")
+            print(f"    [Lỗi mạng] {type(e).__name__} - thử lại ({attempt}/{MAX_RETRIES})...")
         time.sleep(3 * attempt)
     return None
 
@@ -348,7 +349,14 @@ def don_dep_toan_bang(headers, records_url):
 
 
 def main():
+    thieu = [k for k, v in {"PANCAKE_API_KEY": PANCAKE_API_KEY, "PANCAKE_SHOP_ID": PANCAKE_SHOP_ID,
+                            "LARK_APP_ID": LARK_APP_ID, "LARK_APP_SECRET": LARK_APP_SECRET,
+                            "LARK_BASE_APP_TOKEN": LARK_APP_TOKEN}.items() if not v]
+    if thieu:
+        raise SystemExit(f"🛑 Thiếu biến môi trường: {', '.join(thieu)} (kiểm tra secret và phần env trong file yml).")
     lark_token = get_lark_token()
+    if not lark_token:
+        raise SystemExit("🛑 Lấy Lark token thất bại — kiểm tra LARK_APP_ID / LARK_APP_SECRET.")
     headers = {"Authorization": f"Bearer {lark_token}", "Content-Type": "application/json"}
     records_url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records"
 
