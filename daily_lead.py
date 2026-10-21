@@ -10,7 +10,7 @@ import requests
 import pandas as pd
 
 # ── CẤU HÌNH CHUNG ──────────────────────────────────────────────
-CSV_FILE = os.getenv("PAGES_CONFIG_CSV", "pages_config_full_2.csv")
+CSV_FILE = os.getenv("PAGES_CONFIG_CSV", "pages_config_full_2.csv")   # file CSV riêng, có thêm cột lark_platform/lark_channel/lark_project
 DELAY_BETWEEN_CALLS = 1.0
 TZ_VN = datetime.timezone(datetime.timedelta(hours=7))
 
@@ -29,10 +29,13 @@ UNKNOWN_CHANNEL = "Không xác định"
 BASE_URL = "https://pages.fm/api/public_api/v1"
 
 # ── LARK BASE ───────────────────────────────────────────────────
-LARK_APP_ID = os.getenv("LARK_APP_ID", "cli_aa817039ac4bded3")
-LARK_APP_SECRET = os.getenv("LARK_APP_SECRET", "j9zCGmtslYVF8EfegP866bB8fkrKVOgL")   # BẮT BUỘC: set qua biến môi trường / GitHub Secret
-LARK_BASE_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN", "F89WbHMWOaoPDWsUrAHlLhN9gPb")
-LARK_TABLE_ID = os.getenv("LARK_TABLE_ID", "tblkkaGsuLkKbSL7")
+# Đọc từ biến môi trường (GitHub Secrets) — KHÔNG hardcode trong code
+# Cần 2 secret: LARK_APP_ID, LARK_APP_SECRET
+# Bảng này nằm ở base RIÊNG, khác base SALE - Customer data. Mã base và table ID ghi sẵn bên dưới.
+LARK_APP_ID = os.getenv("LARK_APP_ID", "").strip()
+LARK_APP_SECRET = os.getenv("LARK_APP_SECRET", "").strip()
+LARK_BASE_APP_TOKEN = "F89WbHMWOaoPDWsUrAHlLhN9gPb"
+LARK_TABLE_ID = "tblkkaGsuLkKbSL7"
 
 FIELD_MONTH = "Tháng"        # text dạng "9.2026"
 FIELD_PROJECT = "Dự án"
@@ -195,7 +198,7 @@ def fetch_new_customers(page_id: str, token: str, start: datetime.date, end: dat
                 return _fetch_engagement(page_id, token, start, end)
             return sum(int(r.get("new_customer_count") or 0) for r in rows if isinstance(r, dict))
         except requests.RequestException as e:
-            print(f"   ⚠️ Lần {attempt+1}/{retries} lỗi mạng: {e}")
+            print(f"   ⚠️ Lần {attempt+1}/{retries} lỗi mạng: {type(e).__name__}")
             time.sleep(5 * (attempt + 1))
     return None
 
@@ -245,7 +248,7 @@ def lark_list_records(token: str) -> list[dict]:
         data = SESSION.get(url, headers=headers, params=params, timeout=30).json()
         if data.get("code") != 0:
             raise RuntimeError(f"Lark list_records lỗi: {data}")
-        for item in data["data"].get("items", []):
+        for item in data["data"].get("items") or []:
             f = item.get("fields", {})
             platform = extract_text(f.get(FIELD_PLATFORM))
             channel = extract_text(f.get(FIELD_CHANNEL))
@@ -367,8 +370,11 @@ def ensure_month_rows(token: str, records: list[dict], channels: list[dict], y: 
 
 # ── MAIN ────────────────────────────────────────────────────────
 def main():
-    if not LARK_APP_SECRET:
-        raise RuntimeError("Thiếu LARK_APP_SECRET — set biến môi trường / GitHub Secret trước khi chạy.")
+    thieu = [k for k, v in {"LARK_APP_ID": LARK_APP_ID, "LARK_APP_SECRET": LARK_APP_SECRET}.items() if not v]
+    if thieu:
+        raise SystemExit(f"🛑 Thiếu biến môi trường: {', '.join(thieu)} (kiểm tra secret và phần env trong file yml).")
+    if not os.path.exists(CSV_FILE):
+        raise SystemExit(f"🛑 Không tìm thấy file {CSV_FILE} (kiểm tra bước tạo file từ secret PAGES_CONFIG_CSV_2_B64).")
 
     channels = load_channels(CSV_FILE)
     mapped_keys = {c["lark_key"] for c in channels}
