@@ -1,0 +1,39 @@
+name: Auto Sync Pancake Orders to Lark
+
+# Không dùng schedule của GitHub. Lịch chạy do cron-job.org gọi GitHub API (workflow_dispatch),
+# hoặc bấm Run workflow trên tab Actions để chạy tay.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-pancake-orders
+  cancel-in-progress: false        # không chạy chồng 2 lượt, tránh tạo dòng trùng
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run sync_pancake_orders
+        env:
+          PANCAKE_API_KEY: ${{ secrets.PANCAKE_API_KEY }}
+          PANCAKE_SHOP_ID: ${{ secrets.PANCAKE_SHOP_ID }}
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_BASE_APP_TOKEN: ${{ secrets.LARK_BASE_APP_TOKEN }}
+          TZ: Asia/Ho_Chi_Minh
+        run: python sync_pancake_orders.py
