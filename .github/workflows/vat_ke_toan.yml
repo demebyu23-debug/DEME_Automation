@@ -1,0 +1,39 @@
+name: Push VAT Ke Toan
+
+# Không dùng schedule của GitHub. Lịch chạy do cron-job.org gọi GitHub API (workflow_dispatch),
+# hoặc bấm Run workflow trên tab Actions để chạy tay.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: push-vat-ke-toan
+  cancel-in-progress: false        # lần trước chưa xong thì lần sau chờ, không chạy chồng
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Push_Vat_Ke_Toan
+        env:
+          PANCAKE_API_KEY: ${{ secrets.PANCAKE_API_KEY }}
+          PANCAKE_SHOP_ID: ${{ secrets.PANCAKE_SHOP_ID }}
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_BASE_APP_TOKEN_KE_TOAN: ${{ secrets.LARK_BASE_APP_TOKEN_KE_TOAN }}
+          TZ: Asia/Ho_Chi_Minh
+        run: python Push_Vat_Ke_Toan.py
