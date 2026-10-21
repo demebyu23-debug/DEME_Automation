@@ -1,4 +1,4 @@
-name: Refresh Meta Token
+name: refresh_token_fb
 
 # Đổi token Meta mới mỗi tháng và lưu lại vào secret LONG_LIVED_TOKEN.
 # Token Meta hết hạn sau ~60 ngày: workflow này KHÔNG được bỏ lượt quá 1 lần liên tiếp.
