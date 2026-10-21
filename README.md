@@ -11,6 +11,9 @@ Tự động lấy số liệu hội thoại và lead từ Pancake, ghi vào cá
 | Daily Pancake Chat Stats Sync | `pancake_to_lark.py` | 1 lần/ngày, thực tế chạy khoảng 7h sáng | Ghi Tổng hội thoại và Quảng cáo của ngày hôm qua cho tất cả kênh trong CSV vào bảng Chat |
 | Daily Pancake Lead Ecom | `Extract_Lead_Ecom.py` | 1 lần/ngày, thực tế chạy khoảng 7h sáng | Ghi lead ngày hôm qua của các kênh Shopee/TikTok Shop vào bảng Lead Ecom |
 | Realtime Follow Lead (30 mins) | `Follow_lead_realtime.py` | 30 phút/lần, do cron-job.org kích hoạt | Ghi lead, khách cũ, số hội thoại chưa phản hồi theo từng sale vào bảng theo dõi chia lead |
+| Auto Sync Pancake Orders to Lark | `sync_pancake_orders.py` | Do cron-job.org kích hoạt | Đồng bộ đơn hàng Pancake POS cập nhật trong 5 ngày gần nhất vào bảng đơn hàng (dòng mẹ/con), dọn dòng trùng |
+| Push VAT Ke Toan | `Push_Vat_Ke_Toan.py` | Do cron-job.org kích hoạt | Đẩy đơn có thẻ VAT đã giao thành công (3 ngày gần nhất) vào bảng Kế toán, mỗi sản phẩm 1 dòng |
+| Daily Pancake Lead to Lark (theo tháng) | `daily_lead.py` | 06:00 hằng ngày (lịch GitHub) | Ghi tổng lead lũy kế từ mùng 1 đến hôm qua của từng kênh vào bảng lead theo tháng |
 
 Lịch của 2 workflow hằng ngày (dòng `cron` trong file yml) tính theo giờ UTC, tức giờ Việt Nam trừ 7 tiếng.
 
@@ -22,13 +25,16 @@ GitHub thường chạy trễ so với lịch, có khi trễ vài tiếng, đôi
 
 ### Bảng Lark mà từng file code ghi dữ liệu
 
-Cả 3 bảng nằm trong base **SALE - Customer data** trên Lark.
+Các bảng nằm trong base **SALE - Customer data**, riêng bảng Kế toán 2026 nằm ở base Kế toán và bảng lead theo tháng nằm ở một base riêng.
 
 | File code | Bảng Lark | Cách khớp dòng | Cột được ghi |
 |---|---|---|---|
 | `Follow_lead_realtime.py` | **Theo dõi chia leads theo sales** | Cột `Tên TK POS` = tên tài khoản sale trên Pancake | `LEAD Zalo cá nhân`, `LEAD kênh chung`, `KH cũ zalo cá nhân`, `KH cũ kênh chung`, `Số hội thoại chưa phản hồi` |
 | `pancake_to_lark.py` | **Báo cáo hội thoại theo từng kênh** | `Ngày` + `Nền tảng` + `Tên kênh` | `Ngày`, `Nền tảng`, `Tên kênh` (khi tạo dòng mới), `Tổng hội thoại`, `Quảng cáo` |
 | `Extract_Lead_Ecom.py` | **Báo cáo ecom tổng hợp từng kênh** | `Ngày` + `Kênh` | `Ngày`, `Kênh` (khi tạo dòng mới), `Lead` |
+| `sync_pancake_orders.py` | Bảng đơn hàng (base SALE - Customer data) | Cột `ID` = mã đơn Pancake | Thông tin đơn, dòng mẹ/con theo sản phẩm; tự xoá dòng mẹ trùng và dòng con thừa |
+| `Push_Vat_Ke_Toan.py` | **Kế toán 2026** (base Kế toán, **khác base** với các bảng trên) | Cột `ID` = mã đơn Pancake | Chỉ thêm đơn mới, đơn đã có ID trên bảng thì bỏ qua, không sửa |
+| `daily_lead.py` | Bảng lead theo tháng (base riêng, **khác base** SALE - Customer data) | `Tháng` (dạng `9.2026`) + `Nền tảng` + `Tên kênh` (không phân biệt dấu, hoa/thường) | `Tháng`, `Dự án`, `Nền tảng`, `Tên kênh` (khi tạo dòng mới), `Lead` |
 
 Tên cột trong bảng phải khớp đúng với tên khai báo ở đầu mỗi file code (các biến `FIELD_...`). **Đổi tên cột trên Lark thì phải sửa tên tương ứng trong code**, nếu không script sẽ báo lỗi hoặc ghi không vào.
 
@@ -42,7 +48,7 @@ Cách lấy mã: mở bảng trên trình duyệt, xem link có dạng
 https://<tên miền>.larksuite.com/base/<APP TOKEN>?table=<TABLE ID>&view=...
 ```
 
-- `APP TOKEN`: mã base, lưu trong secret `LARK_BASE_APP_TOKEN`. Hiện cả 3 bảng cùng một base nên dùng chung 1 secret. Nếu sau này một bảng chuyển sang base khác, cần tạo secret riêng cho file code đó.
+- `APP TOKEN`: mã base. Các bảng thuộc base SALE - Customer data dùng chung secret `LARK_BASE_APP_TOKEN`; bảng Kế toán 2026 dùng secret riêng `LARK_BASE_APP_TOKEN_KE_TOAN`; riêng `daily_lead.py` ghi sẵn mã base trong code (biến `LARK_BASE_APP_TOKEN` ở đầu file). Nếu sau này một bảng chuyển sang base khác, cần tạo secret riêng cho file code đó.
 - `TABLE ID` (dạng `tbl...`): mã bảng. Chỗ khai báo trong từng file:
 
 | File code | Chỗ khai báo table ID |
@@ -50,6 +56,9 @@ https://<tên miền>.larksuite.com/base/<APP TOKEN>?table=<TABLE ID>&view=...
 | `Follow_lead_realtime.py` | Biến môi trường `LARK_TABLE_ID_SALE`; không đặt thì dùng mã mặc định ghi trong code (biến `LARK_TABLE_ID`) |
 | `pancake_to_lark.py` | Biến `LARK_TABLE_ID` ở đầu file |
 | `Extract_Lead_Ecom.py` | Biến môi trường `LARK_TABLE_ID_LEAD`; không đặt thì dùng mã mặc định ghi trong code (biến `LARK_TABLE_ID`) |
+| `sync_pancake_orders.py` | Biến môi trường `LARK_TABLE_ID_ORDERS`; không đặt thì dùng mã mặc định ghi trong code (biến `LARK_TABLE_ID`) |
+| `Push_Vat_Ke_Toan.py` | Biến môi trường `LARK_TABLE_ID_KE_TOAN`; không đặt thì dùng mã mặc định ghi trong code (biến `LARK_TABLE_ID`) |
+| `daily_lead.py` | Ghi thẳng trong code (biến `LARK_TABLE_ID` ở đầu file, cạnh mã base). Bảng đổi base hoặc tạo lại thì sửa 2 dòng này |
 
 Không dán link bảng Lark vào README hay code: link chứa mã base, mà repo này để public.
 
@@ -57,7 +66,7 @@ App Lark (theo `LARK_APP_ID`) phải được thêm vào base với quyền **ch
 
 ### Lịch chạy Realtime bằng cron-job.org
 
-Workflow Realtime **không dùng lịch của GitHub** (vì hay trễ và bỏ lượt). Thay vào đó, dịch vụ cron-job.org gọi GitHub API mỗi 30 phút để kích hoạt workflow, giống như bấm nút Run workflow.
+Các workflow Realtime, Auto Sync Pancake Orders và Push VAT Ke Toan **không dùng lịch của GitHub** (vì hay trễ và bỏ lượt). Mỗi workflow cần 1 cronjob riêng trên cron-job.org, URL khác nhau ở tên file yml. Thay vào đó, dịch vụ cron-job.org gọi GitHub API mỗi 30 phút để kích hoạt workflow, giống như bấm nút Run workflow.
 
 **1. Tạo token GitHub (chỉ cho phép chạy workflow của repo này)**
 
@@ -100,20 +109,24 @@ Bấm **Test run** trên cron-job.org: kết quả **204** là thành công, tr�
 - **Bảng Chat và bảng Lead Ecom**: mỗi ngày, kênh nào đã có dòng thì chỉ cập nhật số liệu; kênh nào chưa có dòng thì tự tạo dòng mới (điền Ngày, Nền tảng/Kênh và số liệu). Chạy lại nhiều lần không tạo dòng trùng.
 - **Bảng theo dõi chia lead theo sales**: chỉ cập nhật các dòng có sẵn, khớp theo cột **Tên TK POS**. Script không tự tạo dòng cho sale.
 - Bảng Lead Ecom có danh sách dòng cố định khai báo trong `DAILY_ROWS` ở đầu file `Extract_Lead_Ecom.py`. Dòng "Không xác định" luôn điền 0.
+- **Bảng lead theo tháng** (`daily_lead.py`): mỗi tháng mỗi kênh 1 dòng. Script tự tạo dòng còn thiếu cho tháng hiện tại theo danh sách kênh trong `pages_config_full_2.csv`, rồi ghi số lead lũy kế của cả tháng (mùng 1 đến hôm qua). Ngày mùng 1 sẽ chốt số đủ của tháng trước. Page trong CSV không khai báo kênh Lark được cộng dồn vào dòng "Không xác định". Kênh gọi Pancake lỗi thì giữ nguyên số cũ, không ghi đè.
 
 ## Cấu trúc repo
 
 ```
-├── .github/workflows/      # 3 file workflow
+├── .github/workflows/      # 6 file workflow
 ├── pancake_to_lark.py
 ├── Extract_Lead_Ecom.py
 ├── Follow_lead_realtime.py
+├── sync_pancake_orders.py
+├── Push_Vat_Ke_Toan.py
+├── daily_lead.py
 ├── requirements.txt
 ├── .gitignore              # chặn *.csv, .env
 └── README.md
 ```
 
-File `pages_config_full.csv` **không có trong repo**. Mỗi lần chạy, workflow giải mã từ secret ra file tạm.
+File `pages_config_full.csv` và `pages_config_full_2.csv` **không có trong repo**. Mỗi lần chạy, workflow giải mã từ secret ra file tạm.
 
 ## GitHub Secrets cần có
 
@@ -125,9 +138,13 @@ Vào **Settings → Secrets and variables → Actions**.
 | `LARK_APP_SECRET` | App Secret của app Lark |
 | `LARK_BASE_APP_TOKEN` | Mã base Lark (lấy trong link base: `.../base/<mã này>?table=...`) |
 | `PAGES_CONFIG_CSV_B64` | File `pages_config_full.csv` đã mã hoá base64 |
+| `PAGES_CONFIG_CSV_2_B64` | File `pages_config_full_2.csv` đã mã hoá base64 (chỉ dùng cho `daily_lead.py`) |
 | `PERSONAL_ZALO_PAGE_IDS` | Danh sách page ID Zalo cá nhân của sale, nối bằng dấu phẩy, không xuống dòng |
+| `PANCAKE_API_KEY` | API key của shop trên Pancake POS (dùng cho 2 file đơn hàng và VAT). Key này đọc được toàn bộ đơn và thông tin khách |
+| `PANCAKE_SHOP_ID` | Mã shop trên Pancake POS |
+| `LARK_BASE_APP_TOKEN_KE_TOAN` | Mã base Kế toán (chứa bảng Kế toán 2026) |
 
-GitHub không cho xem lại nội dung secret sau khi lưu. **Luôn giữ một bản CSV gốc và danh sách ID Zalo cá nhân ở nơi riêng tư** (máy cá nhân hoặc thư mục giới hạn quyền). Mọi thay đổi đều sửa bản gốc trước, rồi mới cập nhật secret.
+GitHub không cho xem lại nội dung secret sau khi lưu. **Luôn giữ bản gốc của cả 2 file CSV và danh sách ID Zalo cá nhân ở nơi riêng tư** (máy cá nhân hoặc thư mục giới hạn quyền). Mọi thay đổi đều sửa bản gốc trước, rồi mới cập nhật secret.
 
 ## File CSV cấu hình kênh
 
@@ -136,6 +153,13 @@ Các cột: `platform,channel,page_id,access_token`
 - `platform`: viết thường, ví dụ `facebook`, `instagram`, `zalo`, `shopee`, `tiktok`, `tiktokshop`.
 - `channel`: tên kênh. Tên này được ghi lên Lark và dùng để khớp dòng, nên **đặt đúng ngay từ đầu, không đổi về sau**. Đổi tên sẽ làm kênh bị tách thành 2 dòng khác nhau trên Lark.
 - `access_token`: token của page trên Pancake. Để trống thì kênh vẫn có dòng trên Lark nhưng không có số liệu.
+
+### File `pages_config_full_2.csv` (dùng cho bảng lead theo tháng)
+
+Giống file CSV thường, có thêm các cột để khai báo page thuộc dòng nào trên bảng lead theo tháng:
+
+- `lark_platform`, `lark_channel`: Nền tảng và Tên kênh của dòng trên Lark. Nhiều page có thể khai báo cùng một kênh Lark, khi đó lead được cộng dồn. Để trống thì lead của page được cộng vào dòng "Không xác định".
+- `lark_project`: Dự án, dùng khi script tạo dòng mới. Để trống thì script lấy Dự án của kênh đó ở các tháng trước; kênh hoàn toàn mới chưa có Dự án sẽ được báo trong log để điền tay.
 
 ### Mã hoá CSV và cập nhật secret
 
@@ -146,6 +170,8 @@ Mở PowerShell (hoặc Terminal trong VS Code) tại thư mục chứa file CSV
 ```
 
 Chuỗi mã hoá đã được copy vào clipboard. Vào GitHub, bấm vào secret `PAGES_CONFIG_CSV_B64` → **Update** → dán vào → lưu.
+
+Với file `pages_config_full_2.csv`: đổi tên file trong lệnh trên, rồi cập nhật secret `PAGES_CONFIG_CSV_2_B64`.
 
 Không dùng các trang mã hoá base64 trên mạng.
 
@@ -158,6 +184,7 @@ Không dùng các trang mã hoá base64 trên mạng.
 3. Mã hoá lại và cập nhật secret `PAGES_CONFIG_CSV_B64`.
 4. Từ lần chạy sau, bảng Chat tự tạo dòng cho kênh mới và script Realtime tự quét kênh mới.
 5. Nếu kênh cần có trong bảng Lead Ecom: thêm 1 dòng vào `DAILY_ROWS` trong `Extract_Lead_Ecom.py`, rồi commit.
+6. Nếu kênh cần có trong bảng lead theo tháng: thêm dòng vào `pages_config_full_2.csv` gốc (điền `lark_platform`, `lark_channel`, `lark_project`), mã hoá lại và cập nhật secret `PAGES_CONFIG_CSV_2_B64`. Dòng của kênh mới được tạo tự động từ tháng hiện tại.
 
 ### Thêm sale mới
 
@@ -181,6 +208,7 @@ Không dùng các trang mã hoá base64 trên mạng.
 |---|---|---|---|---|
 | Thêm kênh | Có | | | |
 | Thêm kênh vào bảng Lead Ecom | Có | | | Sửa `DAILY_ROWS` |
+| Thêm kênh vào bảng lead theo tháng | Có, và thêm vào `pages_config_full_2.csv` + `PAGES_CONFIG_CSV_2_B64` | | | |
 | Thêm sale | | | Thêm dòng Tên TK POS | |
 | Thêm Zalo cá nhân của sale | Có | Có | | |
 | Sale nghỉ việc | Xoá dòng | Xoá ID | Tuỳ chọn | |
@@ -192,6 +220,7 @@ Sau mỗi thay đổi, vào tab **Actions** → chọn workflow → **Run workfl
 - Chạy ngay: tab **Actions** → chọn workflow → **Run workflow**.
 - Chạy bù (workflow Chat và Lead Ecom): khi bấm Run workflow, nhập ô **TỪ ngày** và **ĐẾN ngày** theo dạng `dd/mm/yyyy`. Chỉ nhập "TỪ ngày" thì chạy đến hôm qua. Để trống cả hai thì chạy cho hôm qua.
 - Chạy bù sẽ **ghi đè** số liệu đã có trong khoảng ngày đó bằng số mới lấy từ Pancake.
+- Workflow lead theo tháng chạy bù theo **tháng**: nhập ô `backfill_from` dạng `M.YYYY` (ví dụ `1.2026`), script chạy từ tháng đó đến tháng hiện tại. Ô `dry_run = true` để chạy thử, chỉ in log, không ghi Lark. Chạy bù chỉ ghi vào dòng đã có; dòng chỉ được tự tạo cho tháng hiện tại.
 - Không dùng nút **Re-run jobs** sau khi đã sửa code: nút này chạy lại đúng phiên bản code cũ.
 
 ## Đọc log và xử lý lỗi
