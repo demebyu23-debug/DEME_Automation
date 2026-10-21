@@ -34,25 +34,26 @@ DRY_RUN = False  # True = chỉ in log, không ghi vào Lark
 CHANNEL_WHITELIST: list[tuple[str, str]] = []
 
 # Các kênh Zalo CÁ NHÂN -- nhận diện theo page_id.
+# Danh sách lưu trong secret PERSONAL_ZALO_PAGE_IDS, các ID cách nhau bằng dấu phẩy.
 PERSONAL_ZALO_PAGE_IDS: set[str] = {
-    "pzl_619701931849206575", "pzl_645875235372158511",
-    "pzl_643063084501639983", "pzl_645316047834632751",
-    "pzl_630819537503081135", "pzl_635041653310902447",
-    "pzl_627723319520943279", "pzl_636027472809740591",
+    x.strip() for x in os.getenv("PERSONAL_ZALO_PAGE_IDS", "").split(",") if x.strip()
 }
 
 # Hội thoại chưa đọc
 SO_GIO_CHUA_DOC = 72      # quét hội thoại cập nhật trong N tiếng gần nhất (72 = 3 ngày)
 MAX_LUOT_HOI_THOAI = 30   # tối đa số lần gọi API hội thoại / kênh (60 hội thoại / lần)
 LOC_THEO_CA = False       # False = điền cho TẤT CẢ sale có trong bảng; True = chỉ sale đang trong ca
-XOA_NGOAI_CA = False      # True = sale ngoài ca bị xóa trống ô "Số hội thoại chưa phản hồi"
+XOA_NGOAI_CA = False
+# Repo public: log GitHub Actions ai cũng xem được -> mặc định KHÔNG in số liệu theo tên sale.
+# Muốn xem chi tiết khi dò lỗi: đặt biến LOG_THEO_SALE=1 (hoặc chạy trên máy).
+LOG_THEO_SALE = os.getenv("LOG_THEO_SALE", "0").strip() == "1"      # True = sale ngoài ca bị xóa trống ô "Số hội thoại chưa phản hồi"
 
 # ── LARK BASE ───────────────────────────────────────────────────
-LARK_APP_ID = os.getenv("LARK_APP_ID")
-LARK_APP_SECRET = os.getenv("LARK_APP_SECRET")   # để trong file .env, KHÔNG ghi thẳng vào code
+LARK_APP_ID = os.getenv("LARK_APP_ID", "").strip()
+LARK_APP_SECRET = os.getenv("LARK_APP_SECRET", "").strip()   # để trong file .env, KHÔNG ghi thẳng vào code
 
-LARK_BASE_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN")
-LARK_TABLE_ID = "tblWpT0rJOIiLpmP"
+LARK_BASE_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN", "").strip()
+LARK_TABLE_ID = os.getenv("LARK_TABLE_ID_SALE", "").strip() or "tblWpT0rJOIiLpmP"
 
 FIELD_MATCH = "Tên TK POS"
 FIELD_CA = "Ca đăng ký"
@@ -341,8 +342,12 @@ def dang_trong_ca(ca_text: str, now) -> bool:
 
 # ── MAIN ────────────────────────────────────────────────────────
 def main():
-    if not LARK_APP_SECRET:
-        raise SystemExit("!! Thiếu LARK_APP_SECRET trong file .env")
+    if not LARK_APP_ID or not LARK_APP_SECRET:
+        raise SystemExit("🛑 Thiếu LARK_APP_ID / LARK_APP_SECRET (secret trên GitHub hoặc file .env khi chạy máy).")
+    if not LARK_BASE_APP_TOKEN:
+        raise SystemExit("🛑 Thiếu LARK_BASE_APP_TOKEN (kiểm tra secret và phần env trong file yml).")
+    if not PERSONAL_ZALO_PAGE_IDS:
+        raise SystemExit("🛑 Thiếu PERSONAL_ZALO_PAGE_IDS — nếu chạy tiếp, toàn bộ Zalo cá nhân sẽ bị tính vào kênh chung.")
     now_vn = datetime.datetime.now(TZ_VN)
     date_range = f"{now_vn:%d/%m/%Y} 00:00:00 - {now_vn:%d/%m/%Y %H:%M:%S}"
     tu_luc = now_vn - datetime.timedelta(hours=SO_GIO_CHUA_DOC)
@@ -351,9 +356,11 @@ def main():
 
     lead_tong, unread_tong = fetch_all(date_range, tu_luc)
     print(f"\n✅ Gom xong: lead {len(lead_tong)} nhân viên")
-    print("--- HỘI THOẠI CHƯA SEEN & KHÁCH NHẮN CUỐI, THEO SALE ĐƯỢC PHÂN CÔNG ---")
-    for ten, v in sorted(unread_tong.items(), key=lambda x: -x[1]):
-        print(f"  {ten}: {v}")
+    print(f"   Hội thoại chưa seen & khách nhắn cuối: {sum(unread_tong.values())}")
+    if LOG_THEO_SALE:
+        print("--- HỘI THOẠI CHƯA SEEN & KHÁCH NHẮN CUỐI, THEO SALE ĐƯỢC PHÂN CÔNG ---")
+        for ten, v in sorted(unread_tong.items(), key=lambda x: -x[1]):
+            print(f"  {ten}: {v}")
 
     print("⏳ Đang lấy danh sách record trên Lark...")
     token = lark_get_tenant_token()
@@ -367,7 +374,8 @@ def main():
         print(f"⚠️ Mã ca chưa biết tên: {', '.join(sorted(con_ma))} -> thêm vào MA_CA_THU_CONG ở đầu file")
 
     updates, da_khop = [], set()
-    print(f"\n{'Tên TK POS':<18} | Lead chung/ZaloCN | KH cũ chung/ZaloCN | Chưa phản hồi")
+    if LOG_THEO_SALE:
+        print(f"\n{'Tên TK POS':<18} | Lead chung/ZaloCN | KH cũ chung/ZaloCN | Chưa phản hồi")
     for r in lark_records:
         if not r["ten_tk_pos"]: continue
         key = normalize_name(r["ten_tk_pos"])
@@ -395,7 +403,8 @@ def main():
 
         lead_txt = f"{vals['lead_kenh_khac']}/{vals['lead_zalo_ca_nhan']}" if vals else "-"
         khcu_txt = f"{vals['khcu_kenh_khac']}/{vals['khcu_zalo_ca_nhan']}" if vals else "-"
-        print(f"{r['ten_tk_pos']:<18} | {lead_txt:<17} | {khcu_txt:<18} | {chua_doc}")
+        if LOG_THEO_SALE:
+            print(f"{r['ten_tk_pos']:<18} | {lead_txt:<17} | {khcu_txt:<18} | {chua_doc}")
         if fields:
             updates.append({"record_id": r["record_id"], "fields": fields})
 
@@ -404,7 +413,10 @@ def main():
     if unread_tong.get("(Chưa phân công)"):
         print(f"\n(Chưa phân công): {unread_tong['(Chưa phân công)']} hội thoại chưa đọc")
     if khong_khop:
-        print(f"⚠️ Nhân viên Pancake không có trong cột '{FIELD_MATCH}': {', '.join(khong_khop)}")
+        if LOG_THEO_SALE:
+            print(f"⚠️ Nhân viên Pancake không có trong cột '{FIELD_MATCH}': {', '.join(khong_khop)}")
+        else:
+            print(f"⚠️ {len(khong_khop)} nhân viên Pancake không có trong cột '{FIELD_MATCH}' (bật LOG_THEO_SALE=1 để xem tên)")
 
     if DRY_RUN:
         print("\n🛑 DRY_RUN=True — chưa ghi Lark."); return
