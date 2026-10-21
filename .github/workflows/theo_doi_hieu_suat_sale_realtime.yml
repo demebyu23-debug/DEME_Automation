@@ -1,4 +1,4 @@
-name: Realtime Follow Lead (10 mins)
+name: theo_doi_hieu_suat_sale_realtime
 
 on:
   workflow_dispatch: {}          # bấm nút chạy thủ công để test
