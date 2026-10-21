@@ -1,4 +1,4 @@
-name: Daily Pancake Chat Stats Sync
+name: hoi_thoai_theo_kenh
 
 on:
   schedule:
