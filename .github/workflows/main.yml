@@ -1,24 +1,16 @@
-name: Daily Pancake Chat Stats Sync
+name: Push VAT Ke Toan
 
 on:
-  schedule:
-    # 20:00 UTC = 03:00 giờ VN (UTC+7) hôm sau
-    - cron: '0 20 * * *'
-  workflow_dispatch:
-    inputs:
-      date_from:
-        description: 'Chạy bù TỪ ngày (dd/mm/yyyy). Để trống = chỉ chạy hôm qua'
-        required: false
-        default: ''
-      date_to:
-        description: 'ĐẾN ngày (dd/mm/yyyy). Để trống = đến hôm qua'
-        required: false
-        default: ''
+  workflow_dispatch: {}            # bấm nút chạy tay để test
+
+concurrency:
+  group: push-vat-ke-toan
+  cancel-in-progress: false        # lần trước chưa xong thì lần sau chờ, không chạy chồng
 
 jobs:
-  sync:
+  push:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -27,26 +19,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Tạo file cấu hình từ Secret
-        env:
-          PAGES_CSV_B64: ${{ secrets.PAGES_CONFIG_CSV_B64 }}
         run: |
-          if [ -z "$PAGES_CSV_B64" ]; then
-            echo "Thiếu secret PAGES_CONFIG_CSV_B64"
-            exit 1
-          fi
-          echo "$PAGES_CSV_B64" | base64 -d > pages_config_full.csv
-          echo "Đã tạo pages_config_full.csv: $(wc -l < pages_config_full.csv) dòng"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run sync script
+      - name: Run Push_Vat_Ke_Toan
         env:
-          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          PANCAKE_API_KEY: ${{ secrets.PANCAKE_API_KEY }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
-          LARK_BASE_APP_TOKEN: ${{ secrets.LARK_BASE_APP_TOKEN }}
-          RUN_DATE_FROM: ${{ github.event.inputs.date_from }}
-          RUN_DATE_TO: ${{ github.event.inputs.date_to }}
-        run: python pancake_to_lark.py
+          TZ: Asia/Ho_Chi_Minh
+        run: python Push_Vat_Ke_Toan.py
