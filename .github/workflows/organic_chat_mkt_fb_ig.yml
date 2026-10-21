@@ -1,4 +1,4 @@
-name: Auto Extract Organic Chat
+name: organic_chat_mkt_fb_ig
 
 on:
   schedule:
