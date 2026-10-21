@@ -43,6 +43,7 @@ jobs:
         env:
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_BASE_APP_TOKEN: ${{ secrets.LARK_BASE_APP_TOKEN }}
           PERSONAL_ZALO_PAGE_IDS: ${{ secrets.PERSONAL_ZALO_PAGE_IDS }}
           TZ: Asia/Ho_Chi_Minh
         run: python Follow_lead_realtime.py
