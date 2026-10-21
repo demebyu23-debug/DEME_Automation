@@ -2,17 +2,23 @@ name: Daily Pancake Chat Stats Sync
 
 on:
   schedule:
+    # 20:00 UTC = 03:00 giờ VN (UTC+7) hôm sau
     - cron: '0 20 * * *'
   workflow_dispatch:
     inputs:
-      run_date:
-        description: 'Ngày chạy bù (dd/mm/yyyy), để trống = hôm qua'
+      date_from:
+        description: 'Chạy bù TỪ ngày (dd/mm/yyyy). Để trống = chỉ chạy hôm qua'
+        required: false
+        default: ''
+      date_to:
+        description: 'ĐẾN ngày (dd/mm/yyyy). Để trống = đến hôm qua'
         required: false
         default: ''
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -41,5 +47,6 @@ jobs:
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
           LARK_BASE_APP_TOKEN: ${{ secrets.LARK_BASE_APP_TOKEN }}
-          RUN_DATE: ${{ github.event.inputs.run_date }}
+          RUN_DATE_FROM: ${{ github.event.inputs.date_from }}
+          RUN_DATE_TO: ${{ github.event.inputs.date_to }}
         run: python pancake_to_lark.py
