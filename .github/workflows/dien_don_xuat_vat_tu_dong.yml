@@ -1,4 +1,4 @@
-name: Auto Sync Pancake Orders to Lark
+name: dien_don_xuat_vat_tu_dong
 
 # Không dùng schedule của GitHub. Lịch chạy do cron-job.org gọi GitHub API (workflow_dispatch),
 # hoặc bấm Run workflow trên tab Actions để chạy tay.
