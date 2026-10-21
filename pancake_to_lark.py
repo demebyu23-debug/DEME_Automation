@@ -17,11 +17,14 @@ LARK_APP_TOKEN = os.environ.get("LARK_BASE_APP_TOKEN", "").strip()
 LARK_TABLE_ID  = "tblEOk6xCdVd5W8x"
 LARK_URL = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records"
 
+# Chạy bù cho ngày cụ thể: đặt biến RUN_DATE = dd/mm/yyyy. Để trống = chạy cho hôm qua.
+RUN_DATE = os.environ.get("RUN_DATE", "").strip()
+
 FIELD_DATE     = "Ngày"
 FIELD_PLATFORM = "Nền tảng"
 FIELD_CHANNEL  = "Tên kênh"
 FIELD_TOTAL    = "Tổng hội thoại"   # Number field
-FIELD_QC       = "Quảng cáo"        # Text field -> phải gửi dạng chuỗi
+FIELD_QC       = "Quảng cáo"        # Number field
 
 SESSION = requests.Session()
 
@@ -45,8 +48,18 @@ def get_lark_token() -> str:
 def lark_headers() -> dict:
     return {"Authorization": f"Bearer {get_lark_token()}"}
 
+def lark_json(res: requests.Response) -> dict:
+    try:
+        return res.json()
+    except ValueError:
+        raise RuntimeError(
+            f"Lark trả HTTP {res.status_code}: {res.text[:200]}\n"
+            f"→ Độ dài base token = {len(LARK_APP_TOKEN)} (đúng là 27), "
+            f"table ID = {len(LARK_TABLE_ID)} (đúng là 16)"
+        )
+
 def build_date_index(date_str: str) -> dict:
-    """Tải record Lark đúng ngày date_str. Trả về {(platform, channel, dd/mm/yyyy): record_id}."""
+    """Tải record Lark đúng ngày date_str. Trả về {(platform, channel): record_id}."""
     print(f"📦 Đang tải index Lark cho ngày {date_str}...")
     index, page_token = {}, ""
 
@@ -55,15 +68,7 @@ def build_date_index(date_str: str) -> dict:
         if page_token:
             params["page_token"] = page_token
 
-        res = SESSION.get(LARK_URL, headers=lark_headers(), params=params, timeout=15)
-        try:
-            res_json = res.json()
-        except ValueError:
-            raise RuntimeError(
-                f"Lark trả HTTP {res.status_code}: {res.text[:200]}\n"
-                f"→ Độ dài base token = {len(LARK_APP_TOKEN)} (đúng là 27), "
-                f"table ID = {len(LARK_TABLE_ID)} (đúng là 16)"
-            )
+        res_json = lark_json(SESSION.get(LARK_URL, headers=lark_headers(), params=params, timeout=15))
         if res_json.get("code") != 0:
             raise RuntimeError(
                 f"Lark trả lỗi khi tải record: code={res_json.get('code')} msg={res_json.get('msg')}\n"
@@ -71,7 +76,7 @@ def build_date_index(date_str: str) -> dict:
             )
 
         data = res_json.get("data", {})
-        for item in data.get("items", []):
+        for item in data.get("items", []) or []:
             f = item["fields"]
             raw_channel = f.get(FIELD_CHANNEL, "")
             channel = (raw_channel[0]["text"] if isinstance(raw_channel, list) else str(raw_channel)).strip()
@@ -86,37 +91,31 @@ def build_date_index(date_str: str) -> dict:
                 d_str = str(raw_date)
 
             if channel and platform and d_str == date_str:
-                index[(platform, channel, d_str)] = item["record_id"]
+                index[(platform, channel)] = item["record_id"]
 
         if not data.get("has_more"):
             break
         page_token = data["page_token"]
 
-    print(f"✅ Index xong: {len(index)} dòng.")
+    print(f"✅ Lark đã có sẵn {len(index)} dòng cho ngày này.\n")
     return index
 
-def push_to_lark(index: dict, date_str: str, platform: str, channel: str, stats: dict) -> bool:
-    record_id = index.get((platform, channel, date_str))
-    if not record_id:
-        print(f"   ⚠️  Không tìm thấy row [{platform}/{channel}] ngày {date_str} trong Lark — bỏ qua.")
-        return False
-
-    res = SESSION.put(
-        f"{LARK_URL}/{record_id}",
-        headers=lark_headers(),
-        json={"fields": {
-            FIELD_TOTAL: float(stats["total"]),
-            FIELD_QC:    float(stats["qc"]),
-        }},
-        timeout=10
-    ).json()
-
-    if res.get("code") == 0:
-        print(f"   ✅ Lark [{platform}/{channel}] {date_str} → Tổng:{stats['total']} QC:{stats['qc']}")
-        return True
-    else:
-        print(f"   ❌ Lark lỗi [{platform}/{channel}]: {res}")
-        return False
+def lark_batch(action: str, records: list[dict]) -> int:
+    """action = 'batch_create' hoặc 'batch_update'. Trả về số dòng ghi thành công."""
+    done = 0
+    for i in range(0, len(records), 500):
+        chunk = records[i:i + 500]
+        res = lark_json(SESSION.post(
+            f"{LARK_URL}/{action}",
+            headers=lark_headers(),
+            json={"records": chunk},
+            timeout=30,
+        ))
+        if res.get("code") == 0:
+            done += len(chunk)
+        else:
+            print(f"   ❌ Lark {action} lỗi: code={res.get('code')} msg={res.get('msg')}")
+    return done
 
 # ── Pancake helpers ─────────────────────────────────────────────
 def load_pages(path: str) -> list[dict]:
@@ -128,8 +127,10 @@ def load_pages(path: str) -> list[dict]:
                 "platform":     row["platform"].strip().lower(),
                 "channel":      row["channel"].strip(),
                 "page_id":      row["page_id"].strip(),
-                "access_token": row.get("access_token", "").strip(),
+                "access_token": (row.get("access_token") or "").strip(),
             })
+    # Sắp xếp theo nền tảng, rồi theo tên kênh -> dòng mới trên Lark ra đúng thứ tự
+    pages.sort(key=lambda p: (p["platform"], p["channel"]))
     return pages
 
 def date_to_ts(d: datetime.date) -> tuple[int, int]:
@@ -141,43 +142,30 @@ def date_to_ts(d: datetime.date) -> tuple[int, int]:
 def fetch_chat_stats(page_id: str, token: str, d: datetime.date, retries=3) -> dict | None:
     since, until = date_to_ts(d)
     url = f"{BASE_URL}/pages/{page_id}/statistics/ads"
+    params = {
+        "access_token":   token,
+        "since":          since,
+        "until":          until,
+        "type_statistic": "day",
+        "type":           "by_time",
+    }
 
     res = None
     for attempt in range(retries):
         try:
-            res = SESSION.get(url, params={
-                "access_token":   token,
-                "since":          since,
-                "until":          until,
-                "type_statistic": "day",
-                "type":           "by_time",
-            }, timeout=30)
-            break
+            res = SESSION.get(url, params=params, timeout=30)
         except requests.RequestException as e:
             print(f"   ⚠️  Lần {attempt+1}/{retries} lỗi mạng: {e}")
-            if attempt < retries - 1:
-                time.sleep(5 * (attempt + 1))
-                continue
-            return None
+            time.sleep(5 * (attempt + 1))
+            continue
+        if res.status_code == 429:
+            print("   ⏳ Bị rate-limit (429), nghỉ 10s rồi thử lại...")
+            time.sleep(10)
+            continue
+        break
 
     if res is None:
         return None
-
-    if res.status_code == 429:
-        print("   ⏳ Bị rate-limit (429), nghỉ 10s rồi thử lại...")
-        time.sleep(10)
-        try:
-            res = SESSION.get(url, params={
-                "access_token":   token,
-                "since":          since,
-                "until":          until,
-                "type_statistic": "day",
-                "type":           "by_time",
-            }, timeout=30)
-        except requests.RequestException as e:
-            print(f"   ❌ Lỗi mạng sau retry: {e}")
-            return None
-
     if res.status_code != 200:
         print(f"   ❌ Pancake {res.status_code}: {res.text[:200]}")
         return None
@@ -195,52 +183,74 @@ def fetch_chat_stats(page_id: str, token: str, d: datetime.date, retries=3) -> d
         ads_data = ads_data.get("data", [])
     total_ads_click = sum(r.get("sum_click", 0) for r in ads_data)
 
-    organic = max(total_inbox - total_ads_click, 0)
-    return {"total": total_inbox, "qc": total_ads_click, "organic": organic}
+    return {"total": total_inbox, "qc": total_ads_click}
 
 # ── Main ──────────────────────────────────────────────────────
 def run():
     if not LARK_CREDS["app_id"] or not LARK_CREDS["app_secret"]:
         print("🛑 Thiếu LARK_APP_ID / LARK_APP_SECRET trong biến môi trường.")
         sys.exit(1)
-    if not LARK_APP_TOKEN or not LARK_TABLE_ID:
+    if not LARK_APP_TOKEN:
         print("🛑 Thiếu LARK_BASE_APP_TOKEN trong biến môi trường (kiểm tra secret và phần env trong file yml).")
         sys.exit(1)
 
     t0 = time.time()
-    yesterday = (datetime.datetime.now(TZ_VN) - datetime.timedelta(days=1)).date()
-    d_str = yesterday.strftime("%d/%m/%Y")
+    if RUN_DATE:
+        run_day = datetime.datetime.strptime(RUN_DATE, "%d/%m/%Y").date()
+    else:
+        run_day = (datetime.datetime.now(TZ_VN) - datetime.timedelta(days=1)).date()
+    d_str = run_day.strftime("%d/%m/%Y")
+    day_ms = date_to_ts(run_day)[0] * 1000   # giá trị cột Ngày (timestamp ms, 0h giờ VN)
     print(f"🚀 Chạy cho ngày: {d_str} (giờ VN)\n")
 
     pages = load_pages(PAGES_CSV)
     index = build_date_index(d_str)
 
-    if not index:
-        print("🛑 Index Lark trống cho ngày này — dừng lại, kiểm tra base/table/quyền truy cập.")
-        sys.exit(1)
+    to_create, to_update = [], []
+    fail = skip = 0
 
-    ok = fail = skip = 0
     for i, p in enumerate(pages, start=1):
         channel, platform, page_id, token = p["channel"], p["platform"], p["page_id"], p["access_token"]
         print(f"[{i}/{len(pages)}] 🔄 {channel} ({platform})")
 
+        stats = None
         if not token:
-            print("   ⚠️  Thiếu access_token — bỏ qua.")
+            print("   ⚠️  Thiếu access_token — chỉ tạo dòng, không có số liệu.")
             skip += 1
-            continue
-
-        stats = fetch_chat_stats(page_id, token, yesterday)
-        if stats is None:
-            fail += 1
         else:
-            success = push_to_lark(index, d_str, platform, channel, stats)
-            ok += 1 if success else 0
-            fail += 0 if success else 1
+            stats = fetch_chat_stats(page_id, token, run_day)
+            if stats is None:
+                fail += 1
+            else:
+                print(f"   Tổng:{stats['total']} QC:{stats['qc']}")
+            if i < len(pages):
+                time.sleep(DELAY_BETWEEN_CALLS)
 
-        if i < len(pages):
-            time.sleep(DELAY_BETWEEN_CALLS)
+        stat_fields = {}
+        if stats is not None:
+            stat_fields = {FIELD_TOTAL: float(stats["total"]), FIELD_QC: float(stats["qc"])}
 
-    print(f"\n🏁 Xong trong {time.time()-t0:.1f}s | ✅ {ok} thành công | ❌ {fail} thất bại | ⏭️ {skip} bỏ qua (thiếu token)")
+        record_id = index.get((platform, channel))
+        if record_id:
+            if stat_fields:
+                to_update.append({"record_id": record_id, "fields": stat_fields})
+        else:
+            to_create.append({"fields": {
+                FIELD_DATE:     day_ms,
+                FIELD_PLATFORM: platform,
+                FIELD_CHANNEL:  channel,
+                **stat_fields,
+            }})
+
+    print(f"\n📝 Ghi vào Lark: tạo mới {len(to_create)} dòng, cập nhật {len(to_update)} dòng...")
+    created = lark_batch("batch_create", to_create) if to_create else 0
+    updated = lark_batch("batch_update", to_update) if to_update else 0
+    fail += (len(to_create) - created) + (len(to_update) - updated)
+
+    print(
+        f"\n🏁 Xong trong {time.time()-t0:.1f}s | 🆕 tạo {created} | ✅ cập nhật {updated} "
+        f"| ❌ {fail} thất bại | ⏭️ {skip} thiếu token"
+    )
 
     if fail > 0:
         sys.exit(1)  # để GitHub Actions đánh dấu run này là failed, dễ nhận thông báo
