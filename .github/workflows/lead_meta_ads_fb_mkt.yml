@@ -1,4 +1,4 @@
-name: Daily Meta to Lark Sync
+name: lead_meta_ads_fb_mkt
 
 on:
   schedule:
