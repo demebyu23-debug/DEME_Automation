@@ -1,4 +1,4 @@
-name: Refresh Meta Token
+name: refresh_token_fb
 
 # Đổi token Meta mới mỗi tháng và lưu lại vào secret LONG_LIVED_TOKEN.
 # Token Meta hết hạn sau ~60 ngày: workflow này KHÔNG được bỏ lượt quá 1 lần liên tiếp.
@@ -36,4 +36,4 @@ jobs:
           META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           REPO: ${{ github.repository }}
-        run: python meta_to_lark.py refresh
+        run: python refresh_token_fb.py refresh

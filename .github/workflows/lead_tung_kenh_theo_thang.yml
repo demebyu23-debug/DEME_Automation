@@ -1,4 +1,4 @@
-name: Daily Pancake Lead to Lark (theo tháng)
+name: lead_tung_kenh_theo_thang
 
 on:
   schedule:

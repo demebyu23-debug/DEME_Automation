@@ -1,4 +1,4 @@
-name: Daily Meta to Lark Sync
+name: lead_meta_ads_fb_mkt
 
 on:
   schedule:
@@ -31,4 +31,4 @@ jobs:
           LONG_LIVED_TOKEN: ${{ secrets.LONG_LIVED_TOKEN }}
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
-        run: python meta_to_lark.py sync
+        run: python lead_meta_ads_fb_mkt.py sync

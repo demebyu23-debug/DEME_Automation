@@ -1,0 +1,53 @@
+name: Update Check Zalo Ecom
+
+# Lịch chạy do cron-job.org gọi GitHub API (workflow_dispatch), không dùng schedule của GitHub.
+# Có thể bấm Run workflow trên tab Actions để chạy tay.
+# cron-job.org gửi body {"ref":"main"} -> chạy với giá trị mặc định: đơn tạo trong 15 ngày, cột Thẻ Pancake.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Quét đơn tạo trong N ngày gần nhất'
+        required: false
+        default: '15'
+      fields:
+        description: 'Cột cần cập nhật, cách nhau dấu phẩy, hoặc all'
+        required: false
+        default: 'Thẻ Pancake'
+      dry_run:
+        description: 'true = chỉ xem trước, không ghi Lark'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: update-check-zalo-ecom
+  cancel-in-progress: false        # không chạy chồng 2 lượt
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run update_check_zalo_ecom
+        env:
+          PANCAKE_API_KEY_1890165155: ${{ secrets.PANCAKE_API_KEY_1890165155 }}
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          DAYS: ${{ github.event.inputs.days || '15' }}
+          FIELDS: ${{ github.event.inputs.fields || 'Thẻ Pancake' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          ARGS=(--days "$DAYS" --fields "$FIELDS")
+          if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+          python update_check_zalo_ecom/update_check_zalo_ecom.py "${ARGS[@]}"

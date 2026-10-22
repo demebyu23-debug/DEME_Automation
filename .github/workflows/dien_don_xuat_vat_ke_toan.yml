@@ -1,4 +1,4 @@
-name: Push VAT Ke Toan
+name: dien_don_xuat_vat_ke_toan
 
 # Không dùng schedule của GitHub. Lịch chạy do cron-job.org gọi GitHub API (workflow_dispatch),
 # hoặc bấm Run workflow trên tab Actions để chạy tay.
