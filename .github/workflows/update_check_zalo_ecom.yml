@@ -50,4 +50,4 @@ jobs:
         run: |
           ARGS=(--days "$DAYS" --fields "$FIELDS")
           if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
-          python update_check_zalo_ecom/update_check_zalo_ecom.py "${ARGS[@]}"
+          python update_check_zalo_ecom.py "${ARGS[@]}"
