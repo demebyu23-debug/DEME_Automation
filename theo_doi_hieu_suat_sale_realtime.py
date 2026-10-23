@@ -1,9 +1,10 @@
 """
 ĐỒNG BỘ PANCAKE -> LARK (bảng "Theo dõi chia lead theo sales")
 
-Quét TẤT CẢ kênh trong pages_config_full.csv (có token), mỗi kênh lấy 2 loại dữ liệu:
-  1. Tương tác khách hôm nay (00:00 -> lúc chạy): KH mới (LEAD) / KH cũ, tách Zalo cá nhân & kênh chung
-     -> ghi 4 cột: LEAD Zalo cá nhân, LEAD kênh chung, KH cũ zalo cá nhân, KH cũ kênh chung
+Quét các kênh trong pages_config_full.csv (có token), BỎ QUA các kênh Zalo cá nhân của sale
+(nhận diện theo PERSONAL_ZALO_PAGE_IDS). Mỗi kênh lấy 2 loại dữ liệu:
+  1. Tương tác khách hôm nay (00:00 -> lúc chạy): KH mới (LEAD) / KH cũ
+     -> ghi 2 cột: LEAD kênh chung, KH cũ kênh chung
   2. Hội thoại chưa đọc VÀ tin cuối do khách gửi, trong 3 ngày gần nhất, theo sale được phân công
      -> ghi cột "Số hội thoại chưa phản hồi" cho tất cả sale có trong bảng
 Khớp tên nhân viên Pancake với cột "Tên TK POS".
@@ -30,11 +31,12 @@ CSV_FILE = "pages_config_full.csv"
 MAX_WORKERS = 5
 DRY_RUN = False  # True = chỉ in log, không ghi vào Lark
 
-# Để trống [] = lấy TẤT CẢ kênh trong CSV.
+# Để trống [] = lấy TẤT CẢ kênh trong CSV (trừ Zalo cá nhân).
 CHANNEL_WHITELIST: list[tuple[str, str]] = []
 
-# Các kênh Zalo CÁ NHÂN -- nhận diện theo page_id.
+# Các kênh Zalo CÁ NHÂN -- nhận diện theo page_id, KHÔNG lấy dữ liệu từ các kênh này.
 # Danh sách lưu trong secret PERSONAL_ZALO_PAGE_IDS, các ID cách nhau bằng dấu phẩy.
+# Vẫn cần secret này: thiếu thì script không biết kênh nào là Zalo cá nhân để bỏ qua.
 PERSONAL_ZALO_PAGE_IDS: set[str] = {
     x.strip() for x in os.getenv("PERSONAL_ZALO_PAGE_IDS", "").split(",") if x.strip()
 }
@@ -43,10 +45,10 @@ PERSONAL_ZALO_PAGE_IDS: set[str] = {
 SO_GIO_CHUA_DOC = 72      # quét hội thoại cập nhật trong N tiếng gần nhất (72 = 3 ngày)
 MAX_LUOT_HOI_THOAI = 30   # tối đa số lần gọi API hội thoại / kênh (60 hội thoại / lần)
 LOC_THEO_CA = False       # False = điền cho TẤT CẢ sale có trong bảng; True = chỉ sale đang trong ca
-XOA_NGOAI_CA = False
+XOA_NGOAI_CA = False      # True = sale ngoài ca bị xóa trống ô "Số hội thoại chưa phản hồi"
 # Repo public: log GitHub Actions ai cũng xem được -> mặc định KHÔNG in số liệu theo tên sale.
 # Muốn xem chi tiết khi dò lỗi: đặt biến LOG_THEO_SALE=1 (hoặc chạy trên máy).
-LOG_THEO_SALE = os.getenv("LOG_THEO_SALE", "0").strip() == "1"      # True = sale ngoài ca bị xóa trống ô "Số hội thoại chưa phản hồi"
+LOG_THEO_SALE = os.getenv("LOG_THEO_SALE", "0").strip() == "1"
 
 # ── LARK BASE ───────────────────────────────────────────────────
 LARK_APP_ID = os.getenv("LARK_APP_ID", "").strip()
@@ -62,11 +64,10 @@ MA_CA_THU_CONG = {
     "optRyyaCVZ": "08:30-18:00",
     "optoGU1CjM": "16:00-24:00",
 }
-FIELD_LEAD_ZALO_RIENG = "LEAD Zalo cá nhân"
 FIELD_LEAD_KENH_CHUNG = "LEAD kênh chung"
-FIELD_KHCU_ZALO_RIENG = "KH cũ zalo cá nhân"
 FIELD_KHCU_KENH_CHUNG = "KH cũ kênh chung"
 FIELD_CHUA_PHAN_HOI = "Số hội thoại chưa phản hồi"
+# 2 cột Zalo cá nhân cũ ("LEAD Zalo cá nhân", "KH cũ zalo cá nhân") KHÔNG còn được ghi.
 
 SESSION = requests.Session()
 
@@ -117,10 +118,14 @@ def get_field(user: dict, *keys, default=0):
 
 
 def load_channels(path: str) -> pd.DataFrame:
+    """Đọc CSV, BỎ các kênh Zalo cá nhân, lọc theo CHANNEL_WHITELIST (nếu có)."""
     df = pd.read_csv(path, dtype=str)
     df = df.dropna(subset=["page_id"]).copy()
     for c in ("page_id", "channel", "platform", "access_token"):
         df[c] = df[c].fillna("").astype(str).str.strip() if c in df else ""
+    so_zalo_cn = int(df["page_id"].isin(PERSONAL_ZALO_PAGE_IDS).sum())
+    df = df[~df["page_id"].isin(PERSONAL_ZALO_PAGE_IDS)].copy()
+    print(f"⏭️  Bỏ qua {so_zalo_cn} kênh Zalo cá nhân.")
     if CHANNEL_WHITELIST:
         wl = {(p.lower(), c.lower()) for p, c in CHANNEL_WHITELIST}
         df = df[df.apply(lambda r: (r["platform"].lower(), r["channel"].lower()) in wl, axis=1)].copy()
@@ -185,26 +190,21 @@ def fetch_unread(page_id, token, tu_luc):
 def process_single_page(row, date_range, tu_luc):
     channel_name = f"{row['platform']} / {row['channel'] or '?'}"
     page_id, token = row["page_id"], row["access_token"]
-    is_personal_zalo = page_id in PERSONAL_ZALO_PAGE_IDS
-    col_type = "Zalo Cá Nhân" if is_personal_zalo else "Kênh Chung"
 
     lead, unread = {}, {}
     if not token:
         return lead, unread, f"  ⚠️ [BỎ QUA] {channel_name}: Thiếu token."
 
-    # 1. Lead / KH cũ
+    # 1. Lead / KH cũ (chỉ kênh chung, Zalo cá nhân đã bị loại ở load_channels)
     records, err_lead = fetch_engagement(page_id, token, date_range)
     for user in records:
         name = user.get("name", "Không rõ")
         kh_moi = int(get_field(user, "new_customer_replied_count", "new_customer") or 0)
         total_eng = int(get_field(user, "total_engagement", "total") or 0)
         kh_cu = max(total_eng - kh_moi, 0)
-        d = lead.setdefault(name, {"lead_zalo_ca_nhan": 0, "lead_kenh_khac": 0,
-                                   "khcu_zalo_ca_nhan": 0, "khcu_kenh_khac": 0})
-        if is_personal_zalo:
-            d["lead_zalo_ca_nhan"] += kh_moi; d["khcu_zalo_ca_nhan"] += kh_cu
-        else:
-            d["lead_kenh_khac"] += kh_moi; d["khcu_kenh_khac"] += kh_cu
+        d = lead.setdefault(name, {"lead_kenh_chung": 0, "khcu_kenh_chung": 0})
+        d["lead_kenh_chung"] += kh_moi
+        d["khcu_kenh_chung"] += kh_cu
 
     # 2. Hội thoại chưa seen & khách nhắn cuối
     unread, tk, err_unread = fetch_unread(page_id, token, tu_luc)
@@ -281,7 +281,7 @@ def lark_map_lua_chon(token: str, ten_cot: str) -> dict:
                 if not d.get("has_more"): break
                 page_token = d.get("page_token")
     except Exception as e:
-        print(f"  (không đọc được cấu hình bảng: {e})")
+        print(f"  (không đọc được cấu hình bảng: {type(e).__name__})")
     ma.update(MA_CA_THU_CONG)
     return ma
 
@@ -347,7 +347,7 @@ def main():
     if not LARK_BASE_APP_TOKEN:
         raise SystemExit("🛑 Thiếu LARK_BASE_APP_TOKEN (kiểm tra secret và phần env trong file yml).")
     if not PERSONAL_ZALO_PAGE_IDS:
-        raise SystemExit("🛑 Thiếu PERSONAL_ZALO_PAGE_IDS — nếu chạy tiếp, toàn bộ Zalo cá nhân sẽ bị tính vào kênh chung.")
+        raise SystemExit("🛑 Thiếu PERSONAL_ZALO_PAGE_IDS — không biết kênh nào là Zalo cá nhân để bỏ qua.")
     now_vn = datetime.datetime.now(TZ_VN)
     date_range = f"{now_vn:%d/%m/%Y} 00:00:00 - {now_vn:%d/%m/%Y %H:%M:%S}"
     tu_luc = now_vn - datetime.timedelta(hours=SO_GIO_CHUA_DOC)
@@ -375,25 +375,20 @@ def main():
 
     updates, da_khop = [], set()
     if LOG_THEO_SALE:
-        print(f"\n{'Tên TK POS':<18} | Lead chung/ZaloCN | KH cũ chung/ZaloCN | Chưa phản hồi")
+        print(f"\n{'Tên TK POS':<18} | Lead chung | KH cũ chung | Chưa phản hồi")
     for r in lark_records:
         if not r["ten_tk_pos"]: continue
         key = normalize_name(r["ten_tk_pos"])
         da_khop.add(key)
-        fields = {}
 
-        # 1. Lead / KH cũ: LUÔN ghi cho tất cả sale, chưa có dữ liệu hôm nay thì ghi 0
-        vals = lead_norm.get(key) or {"lead_zalo_ca_nhan": 0, "lead_kenh_khac": 0,
-                                      "khcu_zalo_ca_nhan": 0, "khcu_kenh_khac": 0}
-        if True:
-            fields.update({
-                FIELD_LEAD_ZALO_RIENG: int(vals["lead_zalo_ca_nhan"]),
-                FIELD_LEAD_KENH_CHUNG: int(vals["lead_kenh_khac"]),
-                FIELD_KHCU_ZALO_RIENG: int(vals["khcu_zalo_ca_nhan"]),
-                FIELD_KHCU_KENH_CHUNG: int(vals["khcu_kenh_khac"]),
-            })
+        # 1. Lead / KH cũ kênh chung: LUÔN ghi cho tất cả sale, chưa có dữ liệu hôm nay thì ghi 0
+        vals = lead_norm.get(key) or {"lead_kenh_chung": 0, "khcu_kenh_chung": 0}
+        fields = {
+            FIELD_LEAD_KENH_CHUNG: int(vals["lead_kenh_chung"]),
+            FIELD_KHCU_KENH_CHUNG: int(vals["khcu_kenh_chung"]),
+        }
 
-        # 2. Hội thoại chưa đọc: chỉ sale đang trong ca
+        # 2. Hội thoại chưa đọc
         if not LOC_THEO_CA or dang_trong_ca(r["ca"], now_vn):
             chua_doc = int(unread_norm.get(key, 0))      # cột dạng Số -> gửi số
             fields[FIELD_CHUA_PHAN_HOI] = chua_doc
@@ -401,12 +396,9 @@ def main():
             chua_doc = "ngoài ca" + (" (xóa)" if XOA_NGOAI_CA else "")
             if XOA_NGOAI_CA: fields[FIELD_CHUA_PHAN_HOI] = None
 
-        lead_txt = f"{vals['lead_kenh_khac']}/{vals['lead_zalo_ca_nhan']}" if vals else "-"
-        khcu_txt = f"{vals['khcu_kenh_khac']}/{vals['khcu_zalo_ca_nhan']}" if vals else "-"
         if LOG_THEO_SALE:
-            print(f"{r['ten_tk_pos']:<18} | {lead_txt:<17} | {khcu_txt:<18} | {chua_doc}")
-        if fields:
-            updates.append({"record_id": r["record_id"], "fields": fields})
+            print(f"{r['ten_tk_pos']:<18} | {vals['lead_kenh_chung']:<10} | {vals['khcu_kenh_chung']:<11} | {chua_doc}")
+        updates.append({"record_id": r["record_id"], "fields": fields})
 
     khong_khop = sorted({k for k in list(lead_tong) + list(unread_tong)
                          if normalize_name(k) not in da_khop and k != "(Chưa phân công)"})
