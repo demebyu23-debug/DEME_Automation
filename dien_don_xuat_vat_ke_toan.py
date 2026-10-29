@@ -1,11 +1,16 @@
 """
 ĐỒNG BỘ ĐƠN ĐÃ GIAO THÀNH CÔNG: PANCAKE -> LARK (bảng Kế toán 2026)
 
-- Chỉ quét đơn CẬP NHẬT trong 3 ngày gần nhất (không dùng cache, không quét lại cả tháng)
-- Chỉ lấy đơn CÓ ngày giao hàng thành công = lúc đơn chuyển sang "Đã nhận" trên Pancake
+- Quét đơn CẬP NHẬT từ ngày TU_NGAY (mặc định 01/10/2026). Để TU_NGAY = "" thì quay lại quét SO_NGAY_QUET ngày gần nhất
+- Chỉ lấy đơn CÓ ngày giao hàng thành công (>= TU_NGAY) = lúc đơn chuyển sang "Đã nhận" trên Pancake
 - Đơn đã có trên Lark (trùng ID) thì BỎ QUA, không thêm, không sửa
-- Mỗi sản phẩm 1 dòng. MST bỏ hết khoảng trắng. SĐT giữ nguyên như trên POS
-"""
+- Số dòng của 1 đơn = số nhóm hàng hóa. "Tên hàng" = tên hàng hóa phân loại theo Mã mẫu mã (giống công thức
+  cột "Tên hàng hóa" trên bảng POS). Trong 1 đơn, các sản phẩm CÙNG tên hàng + CÙNG đơn giá được gộp thành 1 dòng:
+  tên hàng, tổng số lượng, đơn giá, thành tiền, thuế; cột "Mã hàng" ghi tất cả mã của nhóm, ngăn cách bằng ";" + xuống dòng.
+- ID ghi ở MỌI dòng của đơn. Thông tin chung còn lại (ngày giao, khách, MST, nguồn, kho) và Tổng hóa đơn
+  chỉ ghi ở DÒNG ĐẦU của đơn.
+- Bỏ hàng có đơn giá = 0.
+- MST bỏ hết khoảng trắng. SĐT giữ nguyên như trên POS"""
 import os
 import time
 import json
@@ -24,11 +29,12 @@ PANCAKE_API_KEY = os.getenv("PANCAKE_API_KEY", "").strip()
 PANCAKE_SHOP_ID = os.getenv("PANCAKE_SHOP_ID", "").strip()
 
 # ================== CẤU HÌNH ==================
-SO_NGAY_QUET = 3           # quét đơn cập nhật trong N ngày gần nhất
+TU_NGAY = "2026-10-01"     # lấy đơn giao thành công từ ngày này (YYYY-MM-DD, giờ VN). "" = dùng SO_NGAY_QUET
+SO_NGAY_QUET = 3           # chỉ dùng khi TU_NGAY = "": quét đơn cập nhật trong N ngày gần nhất
 LOC_THE_VAT = True         # True = chỉ lấy đơn có thẻ VAT
 VAT_TAG_NAMES = ["VAT", "VAT cá nhân", "VAT công ty"]
 THUE_SUAT = 0.08           # dùng khi sản phẩm không có thuế suất riêng trên POS
-GIA_DA_GOM_VAT = True      # giá trên POS đã gồm VAT -> tách ra giá trước VAT
+GIA_DA_GOM_VAT = False     # False = giá trên POS là giá chưa VAT, dùng luôn làm đơn giá (không tách VAT)
 DELIVERED_STATUS = 3       # trạng thái "Đã nhận" (giao thành công)
 
 
@@ -42,7 +48,6 @@ LARK_APP_SECRET = os.getenv("LARK_APP_SECRET", "").strip()
 LARK_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN_KE_TOAN", "").strip()   # base Kế toán, KHÁC base Sale
 LARK_TABLE_ID = os.getenv("LARK_TABLE_ID_KE_TOAN", "").strip() or "tblsfYXNulnB8aen"
 LARK = "https://open.larksuite.com/open-apis"
-
 # Tên cột trên Lark (đúng như bảng Kế toán 2026)
 COT = {
     "id": "ID",
@@ -67,6 +72,24 @@ COT = {
 }
 # ==============================================
 
+# Phân loại "Tên hàng" theo Mã mẫu mã (giống công thức IFS cột "Tên hàng hóa" trên bảng POS).
+# Xét từ trên xuống, gặp từ khoá đầu tiên có trong Mã mẫu mã (không phân biệt hoa thường) thì lấy tên đó.
+# Không khớp từ khoá nào -> lấy Mã sản phẩm. Thêm / sửa loại hàng: sửa danh sách này.
+QUY_TAC_TEN_HANG = [
+    (["mũ"], "Mũ đồng phục"),
+    (["nón"], "Nón đồng phục"),
+    (["snapfit workwear"], "Tạp dề chống nước có cúc"),
+    (["aquatex", "chống nước"], "Tạp dề chống nước"),
+    (["đeo vai", "canvastique", "dáng dài"], "Tạp dề dài"),
+    (["dáng ngắn"], "Tạp dề ngắn"),
+    (["sơ mi"], "Áo sơ mi đồng phục"),
+    (["phông", "oversize", "thun"], "Áo phông đồng phục"),
+    (["polo", "pique"], "Áo polo đồng phục"),
+    (["bếp"], "Áo bếp đồng phục"),
+    (["hoodie"], "Áo"),
+    (["đồng phục", "uniform", "dongphucdeme"], "Áo đồng phục"),
+]
+
 VN_TZ = timezone(timedelta(hours=7))
 LOAI_GHI_DUOC = {1, 2, 3, 4, 5, 13}   # văn bản, số, chọn 1, chọn nhiều, ngày, SĐT
 
@@ -76,6 +99,21 @@ def norm(s):
 
 
 VAT_TAGS = {norm(x) for x in VAT_TAG_NAMES}
+
+
+def moc_bat_dau():
+    """Thời điểm bắt đầu quét (datetime giờ VN)."""
+    if TU_NGAY.strip():
+        return datetime.strptime(TU_NGAY.strip(), "%Y-%m-%d").replace(tzinfo=VN_TZ)
+    return datetime.now(VN_TZ) - timedelta(days=SO_NGAY_QUET)
+
+
+def ten_hang_hoa(ma_mau_ma: str, ma_san_pham: str) -> str:
+    m = unicodedata.normalize("NFC", str(ma_mau_ma or "")).lower()
+    for tu_khoa, ten in QUY_TAC_TEN_HANG:
+        if any(k in m for k in tu_khoa):
+            return ten
+    return str(ma_san_pham or "")
 
 
 # ===================== PANCAKE =====================
@@ -127,7 +165,8 @@ def tai_don(start_ts, end_ts):
         with ThreadPoolExecutor(max_workers=SO_TRANG_SONG_SONG) as ex:
             for body in ex.map(lambda p: tai_trang(p, start_ts, end_ts), range(2, total + 1)):
                 orders.extend(body.get("data") or [])
-    print(f"-> Tải {len(orders)} đơn cập nhật trong {SO_NGAY_QUET} ngày ({total} trang)")
+    tu = datetime.fromtimestamp(start_ts, VN_TZ).strftime("%d/%m/%Y")
+    print(f"-> Tải {len(orders)} đơn cập nhật từ {tu} ({total} trang)")
     return orders
 
 
@@ -144,11 +183,13 @@ def nguon_don(order):
     return channel or platform
 
 
-def tao_dong(orders):
+def tao_dong(orders, tu_dt):
     rows = []
+    cac_don = []   # [(ngày giao, các dòng của đơn)] để sắp xếp trước khi ghi
     for order in orders:
         ngay_giao = ngay_giao_thanh_cong(order)
         if not ngay_giao: continue                       # chỉ đơn có ngày giao thành công
+        if ngay_giao < tu_dt: continue                   # chỉ đơn giao thành công từ TU_NGAY trở đi
         if LOC_THE_VAT:
             tags = {norm(t.get("name")) for t in (order.get("tags") or []) if isinstance(t, dict)}
             if not (tags & VAT_TAGS): continue
@@ -170,6 +211,8 @@ def tao_dong(orders):
             "nguon": nguon_don(order),
             "kho": (order.get("warehouse_info") or {}).get("name") or "",
         }
+        # 1. Tính từng sản phẩm
+        items = []
         for it in order.get("items") or []:
             qty = int(it.get("quantity") or 0)
             if qty <= 0: continue
@@ -183,13 +226,40 @@ def tao_dong(orders):
             don_gia = (gia * qty - giam) / qty
             if GIA_DA_GOM_VAT: don_gia /= (1 + thue)
             don_gia = round(don_gia)
-            thanh_tien = qty * don_gia
+            if don_gia <= 0: continue                    # bỏ hàng có đơn giá = 0 (quà tặng...)
+            ma_mau_ma = vi.get("display_id") or it.get("display_id") or ""
+            ma_san_pham = (vi.get("product_display_id") or it.get("product_display_id")
+                           or (it.get("product") or {}).get("display_id") or vi.get("name") or it.get("name") or "")
+            items.append({"ma_hang": ma_mau_ma or ma_san_pham, "qty": qty, "don_gia": don_gia, "thue": thue,
+                          "ten_hang": ten_hang_hoa(ma_mau_ma, ma_san_pham)})
+
+        # 2. Gộp theo (tên hàng, đơn giá, thuế suất), giữ thứ tự xuất hiện; mỗi nhóm các dòng nằm liền nhau
+        nhom = {}
+        for x in items:
+            nhom.setdefault((x["ten_hang"], x["don_gia"], x["thue"]), []).append(x)
+
+        dong_don = []     # các dòng của đơn này
+        tong_don = 0      # tổng hóa đơn của cả đơn (thành tiền + tiền thuế của mọi nhóm)
+        for (ten, don_gia, thue), ds in nhom.items():
+            so_luong = sum(x["qty"] for x in ds)
+            thanh_tien = so_luong * don_gia
             tien_thue = round(thanh_tien * thue)
-            rows.append({**base,
-                         "ma_hang": vi.get("display_id") or it.get("product_display_id") or "",
-                         "ten_hang": vi.get("name") or it.get("name") or "",
-                         "so_luong": qty, "don_gia": don_gia, "thanh_tien": thanh_tien,
-                         "thue_suat": thue, "tien_thue": tien_thue, "tong": thanh_tien + tien_thue})
+            tong_don += thanh_tien + tien_thue
+            # 1 nhóm hàng hóa = 1 dòng; các mã hàng trong nhóm nối bằng ";" + xuống dòng
+            ma_hang = ";\n".join(x["ma_hang"] for x in ds)
+            dong_don.append({"_id": base["id"], "id": base["id"], "ma_hang": ma_hang, "ten_hang": ten,
+                             "so_luong": so_luong, "don_gia": don_gia, "thanh_tien": thanh_tien,
+                             "thue_suat": thue, "tien_thue": tien_thue})
+        if dong_don:
+            # ID ghi ở mọi dòng; thông tin chung còn lại (ngày giao, khách, MST, nguồn, kho...) + Tổng hóa đơn: chỉ ở dòng đầu đơn
+            dong_don[0].update(base)
+            dong_don[0]["tong"] = tong_don
+            cac_don.append((ngay_giao, dong_don))
+
+    # Sắp xếp theo ngày giao thành công từ cũ nhất đến mới nhất (các dòng trong 1 đơn giữ nguyên thứ tự)
+    cac_don.sort(key=lambda d: d[0])
+    for _, dong_don in cac_don:
+        rows.extend(dong_don)
     return rows
 
 
@@ -250,19 +320,26 @@ def gia_tri(v, loai):
 
 
 def them_moi(h, records):
+    """Thêm records. Trả về list record_id đúng thứ tự đầu vào (None nếu dòng đó bị lỗi)."""
     url = f"{LARK}/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records/batch_create"
-    ok = 0
+    ids = []
     for i in range(0, len(records), 500):
         chunk = records[i:i + 500]
+        kq = [None] * len(chunk)
         for attempt in range(3):
             try:
                 r = requests.post(url, headers=h, json={"records": chunk}, timeout=60).json()
-                if r.get("code") == 0: ok += len(chunk)
-                else: print(f"   !! Lỗi thêm: {r.get('code')} {r.get('msg')}")
+                if r.get("code") == 0:
+                    tao = (r.get("data") or {}).get("records") or []
+                    for k, rec in enumerate(tao[:len(chunk)]):
+                        kq[k] = rec.get("record_id")
+                else:
+                    print(f"   !! Lỗi thêm: {r.get('code')} {r.get('msg')}")
                 break
             except requests.exceptions.RequestException:
                 time.sleep(5)
-    return ok
+        ids.extend(kq)
+    return ids
 
 
 # ===================== MAIN =====================
@@ -281,16 +358,18 @@ def main():
     if thieu: print(f"  Bảng Lark không có cột: {', '.join(thieu)} (bỏ qua)")
     ghi = {k: (c, types[c]) for k, c in COT.items() if c in types and types[c] in LOAI_GHI_DUOC}
 
+    tu_dt = moc_bat_dau()
+    start_ts = int(tu_dt.timestamp())
     end_ts = int(time.time())
-    orders = tai_don(end_ts - SO_NGAY_QUET * 86400, end_ts)
-    rows = tao_dong(orders)
-    ids = {r["id"] for r in rows}
-    print(f"-> {len(ids)} đơn có ngày giao thành công ({len(rows)} dòng sản phẩm)")
+    orders = tai_don(start_ts, end_ts)
+    rows = tao_dong(orders, tu_dt)
+    ids = {r["_id"] for r in rows}
+    print(f"-> {len(ids)} đơn có ngày giao thành công từ {tu_dt:%d/%m/%Y} ({len(rows)} dòng sản phẩm)")
     if not rows:
         print("Không có đơn mới."); return
 
     da_co = id_da_co(h, ids)
-    moi = [r for r in rows if r["id"] not in da_co]
+    moi = [r for r in rows if r["_id"] not in da_co]
     print(f"-> Đã có trên Lark: {len(ids & da_co)} đơn (bỏ qua) | Đơn mới: {len(ids - da_co)} đơn, {len(moi)} dòng")
     if not moi:
         print(f"Không có đơn mới cần thêm (mất {time.time() - t0:.0f} giây)."); return
@@ -304,12 +383,13 @@ def main():
         records.append({"fields": f})
 
     if DRY_RUN:
-        print("[DRY_RUN] Chưa ghi.")
+        print(f"[DRY_RUN] Chưa ghi: {len(records)} dòng.")
         # Mẫu dòng có tên, SĐT, MST khách -> chỉ in khi chạy trên máy, không in lên log GitHub (repo public)
         if not os.getenv("GITHUB_ACTIONS"):
-            print(json.dumps(records[:1], ensure_ascii=False, indent=2))
+            print(json.dumps(records[:2], ensure_ascii=False, indent=2))
         return
-    ok = them_moi(h, records)
+    ids_ghi = them_moi(h, records)
+    ok = sum(1 for x in ids_ghi if x)
     print(f"✅ Đã thêm {ok}/{len(records)} dòng (mất {time.time() - t0:.0f} giây)")
 
 
