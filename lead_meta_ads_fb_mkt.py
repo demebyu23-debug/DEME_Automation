@@ -312,4 +312,4 @@ if __name__ == "__main__":
     elif mode == "refresh":
         run_refresh()
     else:
-        raise SystemExit("Cách dùng: python meta_to_lark.py [sync|refresh]")
+        raise SystemExit("Cách dùng: lead_meta_ads_fb_mkt.py [sync|refresh]")
