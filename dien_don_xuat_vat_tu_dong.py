@@ -24,9 +24,8 @@ MAX_PANCAKE_PAGES = 300
 UPDATED_WITHIN_DAYS = 5  # QUÉT CÁC ĐƠN CẬP NHẬT TRONG 5 NGÀY QUA (tính đến lúc chạy)
 
 # BƯỚC 5: DỌN TOÀN BẢNG (chạy mỗi lần, không giới hạn 5 ngày)
-# Xóa dòng con thừa (mẹ có nhiều con hơn Số hàng hóa - 1)
-XOA_CON_THUA = True
 # Xóa dòng mẹ trùng: 2 dòng mẹ cùng ID chốt (VD dòng 205887 có ID mới 206292 và 1 dòng 206292 do code tạo)
+# (Đã bỏ logic xóa dòng con thừa: code chỉ THÊM con khi thiếu, không bao giờ xóa con)
 XOA_ME_TRUNG = True
 
 
@@ -98,16 +97,6 @@ def get_number(val):
         return int(float(text_val)) if text_val else 1
     except Exception:
         return 1
-
-
-def get_number_or_none(val):
-    """Như get_number nhưng ô trống / lỗi -> None (không đoán là 1)."""
-    try:
-        if isinstance(val, (int, float)): return int(val)
-        t = extract_text(val)
-        return int(float(t)) if t else None
-    except Exception:
-        return None
 
 
 def get_linked_parent_record_id(raw_muc_me):
@@ -280,19 +269,16 @@ def chon_me_chinh(ds, main_id):
 
 
 def don_dep_toan_bang(headers, records_url):
-    """BƯỚC 5: quét toàn bảng
-    a) Dòng mẹ trùng ID chốt: giữ dòng 'chính' (có ID mới nối tay / nhiều con / nhiều dữ liệu),
-       chép MST, Tên đơn vị... sang dòng chính nếu dòng chính còn trống, rồi xóa dòng trùng KHÔNG có con.
-       Dòng trùng có con -> chỉ báo để kiểm tra tay.
-    b) Dòng con thừa: mẹ có nhiều con hơn Số hàng hóa - 1 -> xóa các con ít dữ liệu nhất.
-       Mẹ để trống Số hàng hóa -> bỏ qua, không xóa."""
-    print("\n--- BƯỚC 5: DỌN TOÀN BẢNG (mẹ trùng ID chốt, con thừa) ---")
+    """BƯỚC 5: quét toàn bảng, xử lý dòng mẹ trùng ID chốt:
+    giữ dòng 'chính' (có ID mới nối tay / nhiều con / nhiều dữ liệu),
+    chép MST, Tên đơn vị... sang dòng chính nếu dòng chính còn trống, rồi xóa dòng trùng KHÔNG có con.
+    Dòng trùng có con -> chỉ báo để kiểm tra tay.
+    (Không xóa dòng con thừa.)"""
+    print("\n--- BƯỚC 5: DỌN TOÀN BẢNG (mẹ trùng ID chốt) ---")
     items = lay_toan_bang(headers, records_url)
     roots, _ = build_records_map_from_items(items)
-    fields_by_rec = {it.get("record_id"): (it.get("fields") or {}) for it in items}
     print(f"-> Bảng có {len(items)} dòng, {len(roots)} dòng mẹ")
 
-    # a) Mẹ trùng ID chốt
     theo_id_chot = {}
     for r in roots:
         if r.get("main_id"): theo_id_chot.setdefault(r["main_id"], []).append(r)
@@ -322,30 +308,12 @@ def don_dep_toan_bang(headers, records_url):
     if can_kiem_tra:
         print("   !! Dòng mẹ trùng nhưng có con, cần kiểm tra tay: " + "; ".join(can_kiem_tra))
 
-    # b) Con thừa
-    con_xoa, dem = [], {}
-    for r in roots:
-        if r["record_id"] in bi_xoa: continue
-        so_hh = get_number_or_none(r["fields"].get("Số hàng hóa"))
-        if so_hh is None: continue
-        can = max(0, so_hh - 1)
-        if r["sub_count"] > can:
-            cac_con = sorted(r["child_records"], key=lambda c: -so_o_co_du_lieu(fields_by_rec.get(c)))
-            thua = cac_con[can:]
-            con_xoa += thua
-            dem[r.get("main_id")] = len(thua)
-    if dem:
-        print("   Con thừa: " + ", ".join(f"đơn {k}: {v} dòng" for k, v in dem.items()))
-
-    se_xoa = set(con_xoa) if XOA_CON_THUA else set()
-    cap_nhat = [u for u in cap_nhat if u["record_id"] not in se_xoa]
     if cap_nhat: batch_execute_lark(headers, records_url, cap_nhat, action="update")
     xoa_me = xoa_records(headers, records_url, me_xoa) if (XOA_ME_TRUNG and me_xoa) else 0
-    xoa_con = xoa_records(headers, records_url, con_xoa) if (XOA_CON_THUA and con_xoa) else 0
-    if (me_xoa and not XOA_ME_TRUNG) or (con_xoa and not XOA_CON_THUA):
+    if me_xoa and not XOA_ME_TRUNG:
         print("   (Đang tắt xóa: chỉ báo, không xóa)")
-    print(f"-> Xóa {xoa_me} dòng mẹ trùng, {xoa_con} dòng con thừa")
-    return xoa_me, xoa_con
+    print(f"-> Xóa {xoa_me} dòng mẹ trùng")
+    return xoa_me
 
 
 def main():
@@ -555,8 +523,8 @@ def main():
 
     print(f"-> Thêm con: {added_subs_count}")
 
-    xoa_me, xoa_con = don_dep_toan_bang(headers, records_url)
-    print(f"\n✅ HOÀN TẤT TOÀN BỘ! Thêm mẹ: {added_moms_count} | Cập nhật dòng: {updated_count} | Thêm con: {added_subs_count} | Xóa mẹ trùng: {xoa_me} | Xóa con thừa: {xoa_con}.")
+    xoa_me = don_dep_toan_bang(headers, records_url)
+    print(f"\n✅ HOÀN TẤT TOÀN BỘ! Thêm mẹ: {added_moms_count} | Cập nhật dòng: {updated_count} | Thêm con: {added_subs_count} | Xóa mẹ trùng: {xoa_me}.")
 
 
 if __name__ == "__main__":
