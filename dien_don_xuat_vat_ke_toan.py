@@ -9,7 +9,7 @@
   tên hàng, tổng số lượng, đơn giá, thành tiền, thuế; cột "Mã hàng" ghi tất cả mã của nhóm, ngăn cách bằng ";" + xuống dòng.
 - ID ghi ở MỌI dòng của đơn. Thông tin chung còn lại (ngày giao, khách, MST, nguồn, kho) và Tổng hóa đơn
   chỉ ghi ở DÒNG ĐẦU của đơn.
-- Bỏ hàng có đơn giá = 0.
+- Bỏ hàng có đơn giá = 0, TRỪ sản phẩm có Mã sản phẩm là "Cờ" (đơn giá = 0 vẫn lấy).
 - MST bỏ hết khoảng trắng. SĐT giữ nguyên như trên POS"""
 import os
 import time
@@ -37,6 +37,10 @@ THUE_SUAT = 0.08           # dùng khi sản phẩm không có thuế suất ri�
 GIA_DA_GOM_VAT = False     # False = giá trên POS là giá chưa VAT, dùng luôn làm đơn giá (không tách VAT)
 DELIVERED_STATUS = 3       # trạng thái "Đã nhận" (giao thành công)
 
+# Sản phẩm được giữ lại dù đơn giá = 0 (so khớp theo Mã sản phẩm, không phân biệt hoa thường)
+MA_SP_GIU_DU_GIA_0 = ["Cờ"]
+# True = so khớp CHỨA từ khóa (vd "Cờ đỏ", "Cờ VN" cũng tính); False = phải khớp chính xác
+GIU_THEO_CHUA = False
 
 DRY_RUN = False            # True = chỉ in ra, không ghi Lark
 
@@ -99,6 +103,16 @@ def norm(s):
 
 
 VAT_TAGS = {norm(x) for x in VAT_TAG_NAMES}
+GIU_GIA_0 = {norm(x) for x in MA_SP_GIU_DU_GIA_0}
+
+
+def duoc_giu_du_gia_0(ma_san_pham):
+    """True nếu sản phẩm (vd Cờ) vẫn được tính dù đơn giá = 0."""
+    m = norm(ma_san_pham)
+    if not m: return False
+    if GIU_THEO_CHUA:
+        return any(k in m for k in GIU_GIA_0)
+    return m in GIU_GIA_0
 
 
 def moc_bat_dau():
@@ -226,10 +240,15 @@ def tao_dong(orders, tu_dt):
             don_gia = (gia * qty - giam) / qty
             if GIA_DA_GOM_VAT: don_gia /= (1 + thue)
             don_gia = round(don_gia)
-            if don_gia <= 0: continue                    # bỏ hàng có đơn giá = 0 (quà tặng...)
+
             ma_mau_ma = vi.get("display_id") or it.get("display_id") or ""
             ma_san_pham = (vi.get("product_display_id") or it.get("product_display_id")
                            or (it.get("product") or {}).get("display_id") or vi.get("name") or it.get("name") or "")
+
+            # bỏ hàng có đơn giá = 0 (quà tặng...), TRỪ sản phẩm Cờ thì vẫn lấy
+            if don_gia <= 0 and not duoc_giu_du_gia_0(ma_san_pham): continue
+            if don_gia < 0: don_gia = 0                  # đề phòng giá âm (giảm giá vượt giá hàng)
+
             items.append({"ma_hang": ma_mau_ma or ma_san_pham, "qty": qty, "don_gia": don_gia, "thue": thue,
                           "ten_hang": ten_hang_hoa(ma_mau_ma, ma_san_pham)})
 
