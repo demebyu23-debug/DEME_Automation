@@ -29,7 +29,7 @@ PANCAKE_API_KEY = os.getenv("PANCAKE_API_KEY", "").strip()
 PANCAKE_SHOP_ID = os.getenv("PANCAKE_SHOP_ID", "").strip()
 
 # ================== CẤU HÌNH ==================
-TU_NGAY = "2026-10-01"     # lấy đơn giao thành công từ ngày này (YYYY-MM-DD, giờ VN). "" = dùng SO_NGAY_QUET
+TU_NGAY = ""     # lấy đơn giao thành công từ ngày này (YYYY-MM-DD, giờ VN). "" = dùng SO_NGAY_QUET
 SO_NGAY_QUET = 3           # chỉ dùng khi TU_NGAY = "": quét đơn cập nhật trong N ngày gần nhất
 LOC_THE_VAT = True         # True = chỉ lấy đơn có thẻ VAT
 VAT_TAG_NAMES = ["VAT", "VAT cá nhân", "VAT công ty"]
@@ -300,14 +300,29 @@ def loai_cot(h):
     return {f["field_name"]: f.get("type") for f in (r.get("data") or {}).get("items") or []}
 
 
+def _text(v):
+    """Lấy chữ từ giá trị ô Lark (có thể là chuỗi, list, dict)."""
+    if isinstance(v, list):
+        return "".join(x.get("text", "") if isinstance(x, dict) else str(x) for x in v)
+    if isinstance(v, dict):
+        return str(v.get("text", ""))
+    return "" if v is None else str(v)
+
+
+def _so(v):
+    try: return round(float(_text(v).replace(",", "") or 0))
+    except ValueError: return 0
+
+
 def id_da_co(h, ids):
-    """Chỉ tra các ID vừa quét được (không đọc cả bảng). Trả về tập ID đã có trên Lark."""
+    """Chỉ tra các ID vừa quét được (không đọc cả bảng).
+    Trả về dict {ID: {(tên hàng, đơn giá), ...}} = các nhóm hàng đơn đó ĐÃ có trên Lark."""
     url = f"{LARK}/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records/search"
-    co = set()
+    co = {}
     ids = list(ids)
     for i in range(0, len(ids), 50):
         chunk = ids[i:i + 50]
-        body = {"field_names": [COT["id"]],
+        body = {"field_names": [COT["id"], COT["ten_hang"], COT["don_gia"]],
                 "filter": {"conjunction": "or",
                            "conditions": [{"field_name": COT["id"], "operator": "is", "value": [x]} for x in chunk]}}
         page_token = ""
@@ -319,9 +334,10 @@ def id_da_co(h, ids):
                 raise SystemExit(f"!! Lỗi tra ID trên Lark: {r.get('code')} {r.get('msg')}")
             d = r.get("data") or {}
             for it in d.get("items") or []:
-                v = (it.get("fields") or {}).get(COT["id"])
-                if isinstance(v, list): v = "".join(x.get("text", "") if isinstance(x, dict) else str(x) for x in v)
-                co.add(str(v).strip().removesuffix(".0"))
+                f = it.get("fields") or {}
+                oid = _text(f.get(COT["id"])).strip().removesuffix(".0")
+                if not oid: continue
+                co.setdefault(oid, set()).add((norm(_text(f.get(COT["ten_hang"]))), _so(f.get(COT["don_gia"]))))
             if not d.get("has_more"): break
             page_token = d.get("page_token")
     return co
@@ -388,10 +404,21 @@ def main():
         print("Không có đơn mới."); return
 
     da_co = id_da_co(h, ids)
-    moi = [r for r in rows if r["_id"] not in da_co]
-    print(f"-> Đã có trên Lark: {len(ids & da_co)} đơn (bỏ qua) | Đơn mới: {len(ids - da_co)} đơn, {len(moi)} dòng")
+    KEYS_DONG = ("_id", "id", "ma_hang", "ten_hang", "so_luong", "don_gia", "thanh_tien", "thue_suat", "tien_thue")
+    moi, don_bu = [], set()
+    for r in rows:
+        if r["_id"] not in da_co:
+            moi.append(r)                                    # đơn mới hoàn toàn
+        elif (norm(r["ten_hang"]), round(r["don_gia"])) not in da_co[r["_id"]]:
+            moi.append({k: r[k] for k in KEYS_DONG if k in r})   # đơn cũ nhưng thiếu nhóm hàng này -> bổ sung
+            don_bu.add(r["_id"])
+    don_moi = ids - set(da_co)
+    print(f"-> Đơn mới: {len(don_moi)} | Đơn cũ thiếu dòng cần bổ sung: {len(don_bu)} | Tổng dòng sẽ thêm: {len(moi)}")
     if not moi:
-        print(f"Không có đơn mới cần thêm (mất {time.time() - t0:.0f} giây)."); return
+        print(f"Không có dòng nào cần thêm (mất {time.time() - t0:.0f} giây)."); return
+    if DRY_RUN:
+        for r in moi[:30]:
+            print(f"   + {r['_id']} | {r['ten_hang']} | {r['ma_hang']!r} | SL {r['so_luong']} | giá {r['don_gia']}")
 
     records = []
     for r in moi:
