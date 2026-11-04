@@ -24,9 +24,19 @@ MAX_PANCAKE_PAGES = 300
 UPDATED_WITHIN_DAYS = 5  # QUÉT CÁC ĐƠN CẬP NHẬT TRONG 5 NGÀY QUA (tính đến lúc chạy)
 
 # BƯỚC 5: DỌN TOÀN BẢNG (chạy mỗi lần, không giới hạn 5 ngày)
-# Xóa dòng mẹ trùng: 2 dòng mẹ cùng ID chốt (VD dòng 205887 có ID mới 206292 và 1 dòng 206292 do code tạo)
-# (Đã bỏ logic xóa dòng con thừa: code chỉ THÊM con khi thiếu, không bao giờ xóa con)
+# Xóa dòng mẹ trùng: 2 dòng mẹ cùng ID chốt (VD dòng 206847 đã ghi ID mới 207884, và 1 dòng 207884 do code tạo
+# trước khi ghi ID mới). Giữ dòng nối tay, xóa dòng do code tạo.
 XOA_ME_TRUNG = True
+# True = dòng mẹ trùng do code tạo ĐÃ CÓ CON vẫn được xóa (xóa cả các dòng con của nó),
+#        miễn là các dòng đó không có dữ liệu nhập tay khác với dòng được giữ.
+# False = dòng trùng có con chỉ báo để kiểm tra tay (như trước).
+XOA_ME_TRUNG_CO_CON = True
+
+# Các cột do code tự ghi. Dữ liệu ở các cột này không tính là "nhập tay" khi xét xóa dòng trùng.
+COT_CODE_GHI = {"ID", "Tên người mua", "CCCD", "MST", "Tên đơn vị", "Địa chỉ", "SĐT",
+                "Email nhận hóa đơn", "Ngày điền xuất VAT", COL_MUC_ME}
+# Loại cột Lark tự tính (công thức, tra cứu, ngày tạo/sửa, người tạo/sửa, số tự tăng): bỏ qua khi xét
+LOAI_COT_TU_DONG = {19, 20, 1001, 1002, 1003, 1004, 1005}
 
 
 def normalize_tag(name):
@@ -72,6 +82,7 @@ def request_with_retry(method, url, **kwargs):
 
 def extract_text(val):
     if val is None or val == "": return ""
+    if isinstance(val, bool): return "1" if val else ""          # ô tích: chưa tích = trống
     if isinstance(val, (int, float)): return str(int(val) if val % 1 == 0 else val)
     if isinstance(val, str):
         val = val.strip()
@@ -130,7 +141,7 @@ def is_root_record(fields):
 def get_lark_token():
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
     resp = request_with_retry("POST", url, json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET})
-    return resp.json().get("tenant_access_token")
+    return resp.json().get("tenant_access_token") if resp is not None else None
 
 
 def _search_ids(headers, records_url, id_values, all_items, seen_record_ids):
@@ -248,8 +259,36 @@ def lay_toan_bang(headers, records_url):
     return items
 
 
+def lay_loai_cot(headers, records_url):
+    """{tên cột: loại cột} của bảng, để phân biệt cột nhập tay với cột công thức / tra cứu."""
+    url = records_url.rsplit("/records", 1)[0] + "/fields"
+    loai, page_token = {}, ""
+    while True:
+        params = {"page_size": 100}
+        if page_token: params["page_token"] = page_token
+        resp = request_with_retry("GET", url, headers=headers, params=params)
+        if resp is None: break
+        d = resp.json().get("data", {}) or {}
+        for f in d.get("items") or []:
+            loai[f.get("field_name")] = f.get("type")
+        if not d.get("has_more"): break
+        page_token = d.get("page_token")
+    return loai
+
+
 def so_o_co_du_lieu(fields):
     return sum(1 for v in (fields or {}).values() if extract_text(v))
+
+
+def gia_tri_nhap_tay(fields, loai_cot):
+    """{cột: giá trị} các ô có dữ liệu ở cột nhập tay (không phải cột code ghi, không phải công thức / tra cứu)."""
+    out = {}
+    for col, v in (fields or {}).items():
+        if col in COT_CODE_GHI or loai_cot.get(col) in LOAI_COT_TU_DONG:
+            continue
+        t = extract_text(v)
+        if t: out[col] = t
+    return out
 
 
 def xoa_records(headers, records_url, ids):
@@ -269,13 +308,18 @@ def chon_me_chinh(ds, main_id):
 
 
 def don_dep_toan_bang(headers, records_url):
-    """BƯỚC 5: quét toàn bảng, xử lý dòng mẹ trùng ID chốt:
-    giữ dòng 'chính' (có ID mới nối tay / nhiều con / nhiều dữ liệu),
-    chép MST, Tên đơn vị... sang dòng chính nếu dòng chính còn trống, rồi xóa dòng trùng KHÔNG có con.
-    Dòng trùng có con -> chỉ báo để kiểm tra tay.
-    (Không xóa dòng con thừa.)"""
+    """BƯỚC 5: quét toàn bảng, xử lý dòng mẹ trùng ID chốt.
+    - Giữ dòng 'chính' (có ID mới nối tay / nhiều con / nhiều dữ liệu).
+    - Chép MST, Tên đơn vị... sang dòng chính nếu dòng chính còn trống.
+    - Xóa dòng trùng KHÔNG có con (như trước).
+    - Dòng trùng CÓ con (VD code tạo dòng 207884 + con trước khi sale ghi ID mới vào dòng 206847):
+      nếu dòng trùng do code tạo (cột ID = ID chốt) và cả dòng mẹ lẫn các dòng con của nó không có dữ liệu
+      nhập tay nào khác với dòng được giữ -> xóa cả mẹ trùng và các con của nó.
+      Ngược lại -> chỉ báo để kiểm tra tay, nêu rõ cột nào đang có dữ liệu riêng."""
     print("\n--- BƯỚC 5: DỌN TOÀN BẢNG (mẹ trùng ID chốt) ---")
     items = lay_toan_bang(headers, records_url)
+    loai_cot = lay_loai_cot(headers, records_url)
+    fields_theo_rec = {it.get("record_id"): it.get("fields") or {} for it in items}
     roots, _ = build_records_map_from_items(items)
     print(f"-> Bảng có {len(items)} dòng, {len(roots)} dòng mẹ")
 
@@ -283,36 +327,63 @@ def don_dep_toan_bang(headers, records_url):
     for r in roots:
         if r.get("main_id"): theo_id_chot.setdefault(r["main_id"], []).append(r)
 
-    me_xoa, cap_nhat, can_kiem_tra = [], [], []
-    bi_xoa = set()
+    me_xoa, con_xoa, cap_nhat, can_kiem_tra = [], [], [], []
     for main_id, ds in theo_id_chot.items():
         if len(ds) < 2: continue
         ds = chon_me_chinh(ds, main_id)
         giu, trung = ds[0], ds[1:]
+
+        # Dữ liệu nhập tay đang có ở dòng được giữ (mẹ + con), để so với dòng trùng
+        da_co_o_giu = {}
+        for rec in [giu["record_id"]] + giu["child_records"]:
+            for col, t in gia_tri_nhap_tay(fields_theo_rec.get(rec), loai_cot).items():
+                da_co_o_giu.setdefault(col, set()).add(t)
+
         bo_sung = {}
+        so_xoa = 0
         for t in trung:
             for col in COMPANY_FIELDS:
                 v_giu, v_t = extract_text(giu["fields"].get(col)), extract_text(t["fields"].get(col))
                 if not v_giu and v_t and col not in bo_sung:
                     bo_sung[col] = chuan_mst(v_t) if col == "MST" else v_t
+
+            id_dong = extract_text(t["fields"].get("ID"))
             if t["sub_count"] == 0:
-                me_xoa.append(t["record_id"]); bi_xoa.add(t["record_id"])
+                me_xoa.append(t["record_id"]); so_xoa += 1
+                continue
+
+            # Dòng trùng có con
+            do_code_tao = id_dong == main_id
+            cot_rieng = set()
+            for rec in [t["record_id"]] + t["child_records"]:
+                for col, val in gia_tri_nhap_tay(fields_theo_rec.get(rec), loai_cot).items():
+                    if val not in da_co_o_giu.get(col, set()):
+                        cot_rieng.add(col)
+
+            if XOA_ME_TRUNG_CO_CON and do_code_tao and not cot_rieng:
+                me_xoa.append(t["record_id"]); con_xoa += t["child_records"]; so_xoa += 1
             else:
-                can_kiem_tra.append(f"{main_id} (dòng ID {extract_text(t['fields'].get('ID'))} có {t['sub_count']} con)")
+                ly_do = ("dòng nối tay, không phải dòng code tạo" if not do_code_tao
+                         else f"có dữ liệu nhập tay riêng ở cột: {', '.join(sorted(cot_rieng))}" if cot_rieng
+                         else "đang tắt XOA_ME_TRUNG_CO_CON")
+                can_kiem_tra.append(f"{main_id} (dòng ID {id_dong}, {t['sub_count']} con: {ly_do})")
+
         if bo_sung:
             cap_nhat.append({"record_id": giu["record_id"], "fields": bo_sung})
             for c in giu["child_records"]:
                 cap_nhat.append({"record_id": c, "fields": bo_sung})
-        print(f"   ID chốt {main_id}: giữ dòng ID {extract_text(giu['fields'].get('ID'))}, "
-              f"{len([t for t in trung if t['record_id'] in bi_xoa])} dòng trùng sẽ xóa")
+        print(f"   ID chốt {main_id}: giữ dòng ID {extract_text(giu['fields'].get('ID'))}, {so_xoa} dòng mẹ trùng sẽ xóa")
     if can_kiem_tra:
-        print("   !! Dòng mẹ trùng nhưng có con, cần kiểm tra tay: " + "; ".join(can_kiem_tra))
+        print("   !! Dòng mẹ trùng cần kiểm tra tay: " + "; ".join(can_kiem_tra))
 
     if cap_nhat: batch_execute_lark(headers, records_url, cap_nhat, action="update")
-    xoa_me = xoa_records(headers, records_url, me_xoa) if (XOA_ME_TRUNG and me_xoa) else 0
-    if me_xoa and not XOA_ME_TRUNG:
-        print("   (Đang tắt xóa: chỉ báo, không xóa)")
-    print(f"-> Xóa {xoa_me} dòng mẹ trùng")
+    if not XOA_ME_TRUNG:
+        if me_xoa: print(f"   (Đang tắt xóa: chỉ báo {len(me_xoa)} dòng mẹ trùng, không xóa)")
+        return 0
+    # Xóa con trước, rồi mới xóa mẹ
+    xoa_con = xoa_records(headers, records_url, con_xoa) if con_xoa else 0
+    xoa_me = xoa_records(headers, records_url, me_xoa) if me_xoa else 0
+    print(f"-> Xóa {xoa_me} dòng mẹ trùng, {xoa_con} dòng con của mẹ trùng")
     return xoa_me
 
 
