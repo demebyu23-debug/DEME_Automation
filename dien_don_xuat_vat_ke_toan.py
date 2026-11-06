@@ -3,13 +3,15 @@
 
 - Quét đơn CẬP NHẬT từ ngày TU_NGAY (mặc định 01/10/2026). Để TU_NGAY = "" thì quay lại quét SO_NGAY_QUET ngày gần nhất
 - Chỉ lấy đơn CÓ ngày giao hàng thành công (>= TU_NGAY) = lúc đơn chuyển sang "Đã nhận" trên Pancake
-- Đơn đã có trên Lark (trùng ID) thì BỎ QUA, không thêm, không sửa
+- Đơn đã có trên Lark (trùng ID): không sửa dòng cũ, chỉ BỔ SUNG nhóm hàng còn thiếu và dòng "Sản phẩm tặng" (nếu có giảm giá)
 - Số dòng của 1 đơn = số nhóm hàng hóa. "Tên hàng" = tên hàng hóa phân loại theo Mã mẫu mã (giống công thức
   cột "Tên hàng hóa" trên bảng POS). Trong 1 đơn, các sản phẩm CÙNG tên hàng + CÙNG đơn giá được gộp thành 1 dòng:
   tên hàng, tổng số lượng, đơn giá, thành tiền, thuế; cột "Mã hàng" ghi tất cả mã của nhóm, ngăn cách bằng ";" + xuống dòng.
 - ID ghi ở MỌI dòng của đơn. Thông tin chung còn lại (ngày giao, khách, MST, nguồn, kho) và Tổng hóa đơn
   chỉ ghi ở DÒNG ĐẦU của đơn.
 - Bỏ hàng có đơn giá = 0, TRỪ sản phẩm có Mã sản phẩm là "Cờ" (đơn giá = 0 vẫn lấy).
+- Đơn có giảm giá: thêm 1 dòng CUỐI đơn, Tên hàng = "Sản phẩm tặng", Số lượng = 1,
+  Đơn giá / Thành tiền / Tiền thuế = giá trị giảm giá (SỐ ÂM).
 - MST bỏ hết khoảng trắng. SĐT giữ nguyên như trên POS"""
 import os
 import time
@@ -41,6 +43,12 @@ DELIVERED_STATUS = 3       # trạng thái "Đã nhận" (giao thành công)
 MA_SP_GIU_DU_GIA_0 = ["Cờ"]
 # True = so khớp CHỨA từ khóa (vd "Cờ đỏ", "Cờ VN" cũng tính); False = phải khớp chính xác
 GIU_THEO_CHUA = False
+
+# Dòng giảm giá ở cuối đơn
+TEN_HANG_GIAM_GIA = "Sản phẩm tặng"
+# False = đơn giá hàng hóa là GIÁ GỐC, giảm giá chỉ nằm ở dòng âm "Sản phẩm tặng" (tổng hóa đơn đúng, không trừ 2 lần)
+# True  = đơn giá hàng hóa đã TRỪ giảm giá như logic cũ (nếu vẫn thêm dòng âm thì giảm giá bị trừ 2 lần)
+GIA_TRU_GIAM_GIA = False
 
 DRY_RUN = False            # True = chỉ in ra, không ghi Lark
 
@@ -104,6 +112,7 @@ def norm(s):
 
 VAT_TAGS = {norm(x) for x in VAT_TAG_NAMES}
 GIU_GIA_0 = {norm(x) for x in MA_SP_GIU_DU_GIA_0}
+TEN_GIAM_GIA_NORM = norm(TEN_HANG_GIAM_GIA)
 
 
 def duoc_giu_du_gia_0(ma_san_pham):
@@ -237,9 +246,10 @@ def tao_dong(orders, tu_dt):
                 giam = float(it.get("discount_each_product")) * qty
             thue = vi.get("tax_rate")
             thue = float(thue) if thue not in (None, "") else THUE_SUAT   # thuế suất riêng của sản phẩm
-            don_gia = (gia * qty - giam) / qty
-            if GIA_DA_GOM_VAT: don_gia /= (1 + thue)
-            don_gia = round(don_gia)
+            he_so = (1 + thue) if GIA_DA_GOM_VAT else 1
+            gia_goc = round(gia / he_so)                                   # giá gốc (chưa trừ giảm giá)
+            gia_net = round((gia * qty - giam) / qty / he_so)              # giá đã trừ giảm giá (logic cũ)
+            don_gia = gia_net if GIA_TRU_GIAM_GIA else gia_goc
 
             ma_mau_ma = vi.get("display_id") or it.get("display_id") or ""
             ma_san_pham = (vi.get("product_display_id") or it.get("product_display_id")
@@ -247,9 +257,10 @@ def tao_dong(orders, tu_dt):
 
             # bỏ hàng có đơn giá = 0 (quà tặng...), TRỪ sản phẩm Cờ thì vẫn lấy
             if don_gia <= 0 and not duoc_giu_du_gia_0(ma_san_pham): continue
-            if don_gia < 0: don_gia = 0                  # đề phòng giá âm (giảm giá vượt giá hàng)
+            if don_gia < 0: don_gia = 0                  # đề phòng giá âm
 
             items.append({"ma_hang": ma_mau_ma or ma_san_pham, "qty": qty, "don_gia": don_gia, "thue": thue,
+                          "giam": giam / he_so, "gia_goc": gia_goc, "gia_net": gia_net,
                           "ten_hang": ten_hang_hoa(ma_mau_ma, ma_san_pham)})
 
         # 2. Gộp theo (tên hàng, đơn giá, thuế suất), giữ thứ tự xuất hiện; mỗi nhóm các dòng nằm liền nhau
@@ -268,7 +279,33 @@ def tao_dong(orders, tu_dt):
             ma_hang = ";\n".join(x["ma_hang"] for x in ds)
             dong_don.append({"_id": base["id"], "id": base["id"], "ma_hang": ma_hang, "ten_hang": ten,
                              "so_luong": so_luong, "don_gia": don_gia, "thanh_tien": thanh_tien,
-                             "thue_suat": thue, "tien_thue": tien_thue})
+                             "thue_suat": thue, "tien_thue": tien_thue,
+                             # giá được coi là "đã có": giá gốc hoặc giá đã trừ giảm giá (dòng cũ trên Lark)
+                             "_gia_khop": {don_gia} | {x["gia_net"] for x in ds}})
+
+        # 3. Đơn có giảm giá -> thêm 1 dòng CUỐI đơn: "Sản phẩm tặng", SL 1, tiền = -(tổng giảm giá)
+        #    Giảm giá của đơn nằm ở order["total_discount"] (gồm giảm giá cấp đơn + giảm giá từng sản phẩm).
+        giam_items = sum(x["giam"] for x in items)                   # giảm giá gắn vào từng sản phẩm
+        giam_don = float(order.get("total_discount") or 0)           # tổng giảm giá của đơn
+        if GIA_TRU_GIAM_GIA:
+            tong_giam = max(0.0, giam_don - giam_items)              # phần giảm giá từng sản phẩm đã trừ vào đơn giá rồi
+        else:
+            tong_giam = max(giam_don, giam_items)                    # đơn giá là giá gốc -> ghi toàn bộ giảm giá
+        # thuế suất của dòng giảm giá = thuế suất bình quân của hàng trong đơn (theo giá trị)
+        co_so = sum(x["don_gia"] * x["qty"] for x in items)
+        thue_chung = (sum(x["don_gia"] * x["qty"] * x["thue"] for x in items) / co_so) if co_so > 0 else THUE_SUAT
+        if GIA_DA_GOM_VAT: tong_giam /= (1 + thue_chung)
+        if dong_don and round(tong_giam) > 0:
+            gia_giam = -round(tong_giam)
+            tien_thue_giam = round(gia_giam * thue_chung)
+            tong_don += gia_giam + tien_thue_giam
+            co_giam = [x for x in items if x["giam"] > 0]
+            dong_don.append({"_id": base["id"], "id": base["id"], "ten_hang": TEN_HANG_GIAM_GIA,
+                             "so_luong": 1, "don_gia": gia_giam, "thanh_tien": gia_giam,
+                             "thue_suat": round(thue_chung, 4), "tien_thue": tien_thue_giam,
+                             "giam_gia": True,
+                             "_meta": {"goc": {x["gia_goc"] for x in co_giam}, "net": {x["gia_net"] for x in co_giam}}})
+
         if dong_don:
             # ID ghi ở mọi dòng; thông tin chung còn lại (ngày giao, khách, MST, nguồn, kho...) + Tổng hóa đơn: chỉ ở dòng đầu đơn
             dong_don[0].update(base)
@@ -316,7 +353,7 @@ def _so(v):
 
 def id_da_co(h, ids):
     """Chỉ tra các ID vừa quét được (không đọc cả bảng).
-    Trả về dict {ID: {(tên hàng, đơn giá), ...}} = các nhóm hàng đơn đó ĐÃ có trên Lark."""
+    Trả về dict {ID: {(tên hàng, đơn giá), ...}} = các dòng đơn đó ĐÃ có trên Lark."""
     url = f"{LARK}/bitable/v1/apps/{LARK_APP_TOKEN}/tables/{LARK_TABLE_ID}/records/search"
     co = {}
     ids = list(ids)
@@ -377,6 +414,21 @@ def them_moi(h, records):
     return ids
 
 
+def can_bo_sung(r, da_co_don):
+    """Đơn đã có trên Lark: dòng r có cần thêm không?"""
+    gia_da_co = {p for _, p in da_co_don}
+    if r.get("giam_gia"):
+        # Đã có dòng 'Sản phẩm tặng' rồi -> thôi
+        if any(t == TEN_GIAM_GIA_NORM for t, _ in da_co_don): return False
+        # Đơn cũ ghi theo kiểu đơn giá ĐÃ trừ giảm giá (chỉ thấy giá net, không thấy giá gốc)
+        # -> thêm dòng âm nữa sẽ trừ 2 lần, nên bỏ qua
+        meta = r["_meta"]
+        if any(n in gia_da_co for n in meta["net"]) and not any(g in gia_da_co for g in meta["goc"]): return False
+        return True
+    ten = norm(r["ten_hang"])
+    return not any((ten, p) in da_co_don for p in r["_gia_khop"])
+
+
 # ===================== MAIN =====================
 def main():
     t0 = time.time()
@@ -408,9 +460,9 @@ def main():
     moi, don_bu = [], set()
     for r in rows:
         if r["_id"] not in da_co:
-            moi.append(r)                                    # đơn mới hoàn toàn
-        elif (norm(r["ten_hang"]), round(r["don_gia"])) not in da_co[r["_id"]]:
-            moi.append({k: r[k] for k in KEYS_DONG if k in r})   # đơn cũ nhưng thiếu nhóm hàng này -> bổ sung
+            moi.append(r)                                        # đơn mới hoàn toàn
+        elif can_bo_sung(r, da_co[r["_id"]]):
+            moi.append({k: r[k] for k in KEYS_DONG if k in r})   # đơn cũ nhưng thiếu dòng này -> bổ sung
             don_bu.add(r["_id"])
     don_moi = ids - set(da_co)
     print(f"-> Đơn mới: {len(don_moi)} | Đơn cũ thiếu dòng cần bổ sung: {len(don_bu)} | Tổng dòng sẽ thêm: {len(moi)}")
@@ -418,7 +470,7 @@ def main():
         print(f"Không có dòng nào cần thêm (mất {time.time() - t0:.0f} giây)."); return
     if DRY_RUN:
         for r in moi[:30]:
-            print(f"   + {r['_id']} | {r['ten_hang']} | {r['ma_hang']!r} | SL {r['so_luong']} | giá {r['don_gia']}")
+            print(f"   + {r['_id']} | {r['ten_hang']} | {r.get('ma_hang', '')!r} | SL {r['so_luong']} | giá {r['don_gia']}")
 
     records = []
     for r in moi:
