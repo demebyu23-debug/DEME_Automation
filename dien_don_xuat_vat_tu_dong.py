@@ -4,6 +4,7 @@ import requests
 import json
 import ast
 import unicodedata
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
@@ -21,7 +22,7 @@ LARK_TABLE_ID = os.getenv("LARK_TABLE_ID_ORDERS", "").strip() or "tblBzXKFjP0eIy
 COL_MUC_ME = "Các mục mẹ"
 MAX_RETRIES = 3
 MAX_PANCAKE_PAGES = 300
-UPDATED_WITHIN_DAYS = 5  # QUÉT CÁC ĐƠN CẬP NHẬT TRONG 5 NGÀY QUA (tính đến lúc chạy)
+UPDATED_WITHIN_DAYS = 15  # QUÉT CÁC ĐƠN CẬP NHẬT TRONG 5 NGÀY QUA (tính đến lúc chạy)
 
 # BƯỚC 5: DỌN TOÀN BẢNG (chạy mỗi lần, không giới hạn 5 ngày)
 # Xóa dòng mẹ trùng: 2 dòng mẹ cùng ID chốt (VD dòng 206847 đã ghi ID mới 207884, và 1 dòng 207884 do code tạo
@@ -50,13 +51,42 @@ def chuan_mst(mst):
 
 
 # CHỈ ĐỒNG BỘ ĐƠN CÓ MỘT TRONG CÁC THẺ NÀY
-VAT_TAGS = {normalize_tag(x) for x in ["VAT cá nhân", "VAT công ty"]}
+TAG_VAT_CA_NHAN = normalize_tag("VAT cá nhân")
+TAG_VAT_CONG_TY = normalize_tag("VAT công ty")
+VAT_TAGS = {TAG_VAT_CA_NHAN, TAG_VAT_CONG_TY}
 TAG_KHAC_PHUC = normalize_tag("khắc phục")
 
 # CÁC CỘT THÔNG TIN CÔNG TY / XUẤT HÓA ĐƠN
-# Nếu trên Lark đã có MST hoặc Tên đơn vị (tự điền tay) mà đơn POS không có thông tin công ty
-# thì KHÔNG ghi đè các cột này bằng dữ liệu cá nhân từ POS.
+# - Đơn có thẻ "VAT công ty": ghi thông tin công ty từ POS.
+# - Đơn CHỈ có thẻ "VAT cá nhân" (không có "VAT công ty"): KHÔNG xuất thông tin công ty,
+#   và nếu bản ghi trên Lark đã có thông tin công ty (MST / Tên đơn vị) thì xóa cụm này đi
+#   (MST, Tên đơn vị xóa trống; Địa chỉ, SĐT, Email thay bằng thông tin cá nhân từ POS).
+# - Đơn không có thông tin công ty ở POS nhưng Lark đã có (sale tự điền tay) và đơn là "VAT công ty":
+#   giữ nguyên, không ghi đè bằng dữ liệu cá nhân.
 COMPANY_FIELDS = ["MST", "Tên đơn vị", "Địa chỉ", "SĐT", "Email nhận hóa đơn"]
+
+# Thông tin công ty trên POS gắn theo ID KHÁCH, không gắn theo đơn. Khi 1 khách đặt cho 2 công ty khác nhau,
+# thông tin công ty 2 sẽ đè lên công ty 1, và đơn 1 khi quét lại sẽ đọc ra thông tin công ty 2.
+# -> Trước khi cập nhật cụm công ty cho 1 dòng đã có thông tin công ty trên Lark, kiểm tra xem POS có còn là
+#    CÙNG công ty đó không. Cùng công ty (MST trùng, hoặc tên gần như y hệt do sửa lỗi gõ MST / sửa nhẹ thông tin)
+#    -> cập nhật bình thường. Khác công ty -> giữ nguyên thông tin đã điền trên Lark, không ghi đè.
+NGUONG_TEN_GIONG = 0.9  # độ giống tên đơn vị (0-1) để coi là cùng công ty khi MST khác nhau
+
+
+def cung_cong_ty(lark_fields, pos_fields):
+    """True nếu cụm công ty trên POS được phép ghi vào dòng Lark này."""
+    mst_l = chuan_mst(extract_text(lark_fields.get("MST")))
+    mst_p = chuan_mst(pos_fields.get("MST"))
+    ten_l = normalize_tag(extract_text(lark_fields.get("Tên đơn vị")))
+    ten_p = normalize_tag(pos_fields.get("Tên đơn vị"))
+
+    # Lark chưa có thông tin công ty -> bổ sung bình thường
+    if not mst_l and not ten_l: return True
+    # Cùng MST (so 10 số đầu, 13 số là chi nhánh) -> cùng công ty, cho cập nhật các trường còn lại
+    if mst_l and mst_p and mst_l[:10] == mst_p[:10]: return True
+    # MST khác nhưng tên gần như y hệt -> sale sửa lỗi gõ MST / sửa nhẹ thông tin
+    if ten_l and ten_p and SequenceMatcher(None, ten_l, ten_p).ratio() >= NGUONG_TEN_GIONG: return True
+    return False
 
 
 def request_with_retry(method, url, **kwargs):
@@ -436,6 +466,9 @@ def main():
 
             if not has_vat: continue
 
+            # CHỈ "VAT cá nhân" (không có "VAT công ty") -> không xuất thông tin công ty
+            chi_ca_nhan = (TAG_VAT_CA_NHAN in tag_names) and (TAG_VAT_CONG_TY not in tag_names)
+
             system_id = str(order.get("system_id") or "").strip()
             if not system_id: continue
 
@@ -453,7 +486,7 @@ def main():
             comp_phone = company.get("company_phone") if company else ""
 
             customer_phone = str(ship_phone).strip() if str(ship_phone).strip() else str(cust_phone).strip()
-            company_phone = str(comp_phone or "").strip()
+            company_phone = "" if chi_ca_nhan else str(comp_phone or "").strip()
 
             if not customer_phone and not company_phone: continue
 
@@ -465,7 +498,8 @@ def main():
                 "CCCD": customer.get("identity_code") or "",
             }
 
-            pos_has_company = bool(company and company.get("company_name"))
+            # Đơn chỉ "VAT cá nhân": bỏ qua company_info của POS dù khách có lưu thông tin công ty
+            pos_has_company = bool(company and company.get("company_name")) and not chi_ca_nhan
 
             if pos_has_company:
                 desired_fields["MST"] = chuan_mst(company.get("company_tax_id"))
@@ -484,7 +518,8 @@ def main():
                 "system_id": system_id,
                 "fields": desired_fields,
                 "has_khac_phuc": has_khac_phuc,
-                "has_company": pos_has_company
+                "has_company": pos_has_company,
+                "chi_ca_nhan": chi_ca_nhan
             })
 
         page_num += 1
@@ -503,6 +538,7 @@ def main():
     print("\n--- BƯỚC 3: PHÂN LOẠI & CẬP NHẬT/TẠO MỚI ---")
     moms_to_create = []
     records_to_update = []
+    so_xoa_cong_ty = 0
 
     for lark_record in lark_roots:
         main_id = lark_record.get("main_id")
@@ -510,23 +546,44 @@ def main():
             pos_order = pancake_data_map[main_id]
             fields_to_apply = pos_order["fields"]
             lark_fields = lark_record["fields"]
+            chi_ca_nhan = pos_order["chi_ca_nhan"]
 
             # Trên Lark đã có thông tin công ty (thường là tự điền tay)?
             lark_has_company = bool(extract_text(lark_fields.get("MST")) or extract_text(lark_fields.get("Tên đơn vị")))
 
+            # POS đang trả về công ty KHÁC với công ty đã điền trên Lark (khách đặt tiếp cho công ty thứ 2)
+            # -> bỏ qua cả cụm công ty, giữ nguyên dữ liệu đơn này
+            bo_qua_cong_ty = pos_order["has_company"] and not cung_cong_ty(lark_fields, fields_to_apply)
+            if bo_qua_cong_ty:
+                print(f"   [GIỮ NGUYÊN] Đơn {main_id}: POS đang là công ty khác "
+                      f"(POS: {fields_to_apply.get('MST')} / Lark: {extract_text(lark_fields.get('MST'))}), không ghi đè.")
+
             update_payload = {}
             for key, val in fields_to_apply.items():
+                if bo_qua_cong_ty and key in COMPANY_FIELDS: continue
                 new_val = str(val or "").strip()
+
+                # 0. Đơn chỉ "VAT cá nhân" mà Lark đang có thông tin công ty -> xóa cụm công ty:
+                #    MST / Tên đơn vị về trống; Địa chỉ / SĐT / Email thay bằng thông tin cá nhân (kể cả trống)
+                if chi_ca_nhan and lark_has_company and key in COMPANY_FIELDS:
+                    current_val = extract_text(lark_fields.get(key))
+                    if str(current_val) != new_val:
+                        update_payload[key] = new_val
+                    continue
 
                 # 1. Không bao giờ ghi ô trống đè lên dữ liệu trên Lark
                 if not new_val: continue
 
                 # 2. POS không có thông tin công ty nhưng Lark đã có -> giữ nguyên cụm thông tin công ty trên Lark
+                #    (chỉ áp dụng cho đơn "VAT công ty"; đơn chỉ "VAT cá nhân" đã được xử lý ở mục 0)
                 if not pos_order["has_company"] and lark_has_company and key in COMPANY_FIELDS: continue
 
                 current_val = extract_text(lark_fields.get(key))
                 if str(current_val) != new_val:
                     update_payload[key] = new_val
+
+            if chi_ca_nhan and lark_has_company and update_payload:
+                so_xoa_cong_ty += 1
 
             # 3. MST sale tự điền trên Lark có khoảng trắng -> làm sạch
             mst_lark = extract_text(lark_fields.get("MST"))
@@ -554,6 +611,8 @@ def main():
                 sys_id_to_root[system_id] = True
 
     print(f"-> Chuẩn bị cập nhật {len(records_to_update)} dòng và tạo mới {len(moms_to_create)} đơn mẹ...")
+    if so_xoa_cong_ty:
+        print(f"-> Trong đó {so_xoa_cong_ty} đơn mẹ chỉ có thẻ VAT cá nhân sẽ bị xóa thông tin công ty.")
     updated_count = batch_execute_lark(headers, records_url, records_to_update, action="update") if records_to_update else 0
     added_moms_count = batch_execute_lark(headers, records_url, moms_to_create, action="create") if moms_to_create else 0
 
