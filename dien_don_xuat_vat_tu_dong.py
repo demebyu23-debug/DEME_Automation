@@ -22,7 +22,7 @@ LARK_TABLE_ID = os.getenv("LARK_TABLE_ID_ORDERS", "").strip() or "tblBzXKFjP0eIy
 COL_MUC_ME = "Các mục mẹ"
 MAX_RETRIES = 3
 MAX_PANCAKE_PAGES = 300
-UPDATED_WITHIN_DAYS = 15  # QUÉT CÁC ĐƠN CẬP NHẬT TRONG 5 NGÀY QUA (tính đến lúc chạy)
+UPDATED_WITHIN_DAYS = 5  # QUÉT CÁC ĐƠN CẬP NHẬT TRONG 5 NGÀY QUA (tính đến lúc chạy)
 
 # BƯỚC 5: DỌN TOÀN BẢNG (chạy mỗi lần, không giới hạn 5 ngày)
 # Xóa dòng mẹ trùng: 2 dòng mẹ cùng ID chốt (VD dòng 206847 đã ghi ID mới 207884, và 1 dòng 207884 do code tạo
