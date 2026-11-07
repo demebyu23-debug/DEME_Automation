@@ -12,6 +12,7 @@
 - Bỏ hàng có đơn giá = 0, TRỪ sản phẩm có Mã sản phẩm là "Cờ" (đơn giá = 0 vẫn lấy).
 - Đơn có giảm giá: thêm 1 dòng CUỐI đơn, Tên hàng = "Sản phẩm tặng", Số lượng = 1,
   Đơn giá / Thành tiền / Tiền thuế = giá trị giảm giá (SỐ ÂM).
+- Đơn CHỈ có thẻ "VAT cá nhân" (không có "VAT công ty"): KHÔNG xuất thông tin công ty (MST, Tên công ty, Địa chỉ công ty).
 - MST bỏ hết khoảng trắng. SĐT giữ nguyên như trên POS"""
 import os
 import time
@@ -35,6 +36,8 @@ TU_NGAY = ""     # lấy đơn giao thành công từ ngày này (YYYY-MM-DD, gi
 SO_NGAY_QUET = 3           # chỉ dùng khi TU_NGAY = "": quét đơn cập nhật trong N ngày gần nhất
 LOC_THE_VAT = True         # True = chỉ lấy đơn có thẻ VAT
 VAT_TAG_NAMES = ["VAT", "VAT cá nhân", "VAT công ty"]
+TAG_VAT_CA_NHAN = "VAT cá nhân"
+TAG_VAT_CONG_TY = "VAT công ty"
 THUE_SUAT = 0.08           # dùng khi sản phẩm không có thuế suất riêng trên POS
 GIA_DA_GOM_VAT = False     # False = giá trên POS là giá chưa VAT, dùng luôn làm đơn giá (không tách VAT)
 DELIVERED_STATUS = 3       # trạng thái "Đã nhận" (giao thành công)
@@ -111,6 +114,8 @@ def norm(s):
 
 
 VAT_TAGS = {norm(x) for x in VAT_TAG_NAMES}
+NORM_VAT_CA_NHAN = norm(TAG_VAT_CA_NHAN)
+NORM_VAT_CONG_TY = norm(TAG_VAT_CONG_TY)
 GIU_GIA_0 = {norm(x) for x in MA_SP_GIU_DU_GIA_0}
 TEN_GIAM_GIA_NORM = norm(TEN_HANG_GIAM_GIA)
 
@@ -209,17 +214,22 @@ def nguon_don(order):
 def tao_dong(orders, tu_dt):
     rows = []
     cac_don = []   # [(ngày giao, các dòng của đơn)] để sắp xếp trước khi ghi
+    so_ca_nhan = 0
     for order in orders:
         ngay_giao = ngay_giao_thanh_cong(order)
         if not ngay_giao: continue                       # chỉ đơn có ngày giao thành công
         if ngay_giao < tu_dt: continue                   # chỉ đơn giao thành công từ TU_NGAY trở đi
-        if LOC_THE_VAT:
-            tags = {norm(t.get("name")) for t in (order.get("tags") or []) if isinstance(t, dict)}
-            if not (tags & VAT_TAGS): continue
+        tags = {norm(t.get("name")) for t in (order.get("tags") or []) if isinstance(t, dict)}
+        if LOC_THE_VAT and not (tags & VAT_TAGS): continue
+
+        # Đơn CHỈ có "VAT cá nhân" (không có "VAT công ty") -> không xuất thông tin công ty
+        chi_ca_nhan = (NORM_VAT_CA_NHAN in tags) and (NORM_VAT_CONG_TY not in tags)
 
         customer = order.get("customer") or {}
         shipping = order.get("shipping_address") or {}
-        company = customer.get("company_info") or {}
+        company = {} if chi_ca_nhan else (customer.get("company_info") or {})
+        if chi_ca_nhan and (customer.get("company_info") or {}).get("company_name"):
+            so_ca_nhan += 1                              # đếm đơn bị bỏ thông tin công ty (để in log)
         phones = customer.get("phone_numbers") or []
         base = {
             "id": str(order.get("system_id") or order.get("id") or ""),
@@ -311,6 +321,9 @@ def tao_dong(orders, tu_dt):
             dong_don[0].update(base)
             dong_don[0]["tong"] = tong_don
             cac_don.append((ngay_giao, dong_don))
+
+    if so_ca_nhan:
+        print(f"-> {so_ca_nhan} đơn chỉ có thẻ VAT cá nhân: bỏ thông tin công ty (MST, Tên công ty, Địa chỉ công ty)")
 
     # Sắp xếp theo ngày giao thành công từ cũ nhất đến mới nhất (các dòng trong 1 đơn giữ nguyên thứ tự)
     cac_don.sort(key=lambda d: d[0])
