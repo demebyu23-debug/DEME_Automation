@@ -23,7 +23,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import requests
-
+from dotenv import load_dotenv
+load_dotenv()  # đọc file .env cạnh script (hoặc thư mục hiện tại)
 # ====================== CẤU HÌNH ======================
 PANCAKE_BASE = "https://pos.pages.fm/api/v1"
 SHOP_ID = "1890165155"
