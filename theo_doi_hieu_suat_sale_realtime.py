@@ -12,13 +12,16 @@ Khớp tên nhân viên Pancake với cột "Tên TK POS".
 
 LƯU DỮ LIỆU THEO NGÀY (mới):
   - Mỗi lần chạy, đọc bảng "Đăng ký ca" để lấy danh sách người có ca làm HÔM NAY (bỏ OFF / NP).
-  - Với mỗi người chưa có bản ghi hôm nay trong bảng theo dõi -> tạo bản ghi mới, điền cột "Sales".
-    (chạy lần đầu của ngày sẽ tạo đủ, các lần sau không tạo trùng; ai đăng ký muộn sẽ được bổ sung)
+  - Số bản ghi hôm nay của mỗi người = số ca người đó đăng ký hôm nay; chỉ tạo phần còn thiếu
+    (chạy lần đầu của ngày tạo đủ, các lần sau không tạo thêm; ai đăng ký muộn sẽ được bổ sung).
   - Chỉ cập nhật số liệu cho các bản ghi của HÔM NAY. Bản ghi các ngày trước giữ nguyên.
-  - Ngày của bản ghi lấy theo thời điểm tạo (cột "Ngày" kiểu Created time trong Lark).
+  - Ngày của bản ghi lấy từ cột "Ngày" (kiểu Date, script tự điền khi tạo bản ghi; nếu ô trống mới dùng ngày tạo).
+  - Chọn ngày điền: python file.py 2026-11-10 (không chọn = hôm nay). Ngày cũ vẫn được tạo bản ghi thiếu + điền số liệu.
 """
 import os
 import re
+import json
+import sys
 import time
 import datetime
 import unicodedata
@@ -36,7 +39,7 @@ BASE_V1 = "https://pages.fm/api/public_api/v1"
 BASE_V2 = "https://pages.fm/api/public_api/v2"
 CSV_FILE = "pages_config_full.csv"
 
-MAX_WORKERS = 5
+MAX_WORKERS = 8            # số kênh quét song song (mỗi kênh dùng thêm 1 luồng phụ). Gặp lỗi 429 thì hạ xuống 5
 DRY_RUN = False  # True = chỉ in log, không ghi / không tạo bản ghi trên Lark
 
 # Để trống [] = lấy TẤT CẢ kênh trong CSV (trừ Zalo cá nhân).
@@ -67,7 +70,7 @@ LARK_BASE_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN", "").strip()
 LARK_TABLE_ID = os.getenv("LARK_TABLE_ID_SALE", "").strip() or "tblWpT0rJOIiLpmP"
 
 FIELD_SALES = "Sales"                 # cột Người (Person) -- cột duy nhất script điền khi tạo bản ghi mới
-FIELD_NGAY = "Ngày"                   # cột Created time của bảng đích (dự phòng nếu API không trả created_time)
+FIELD_NGAY = "Ngày"                   # cột Date của bảng đích -- script ghi ngày khi tạo bản ghi, và đọc ngày từ đây
 FIELD_MATCH = "Tên TK POS"
 FIELD_CA = "Ca làm"                   # cột Single option: script ghi tên ca (lấy từ "Ca đăng ký")
 # Mã lựa chọn của cột Ca -> tên ca (dùng khi Lark trả về mã thay vì chữ). Thêm ca mới thì thêm dòng.
@@ -94,6 +97,26 @@ CA_KHONG_LAM = {"off", "np"}
 SESSION = requests.Session()
 
 
+def chon_ngay_chay(now_vn: datetime.datetime) -> datetime.date:
+    """Ngày cần điền dữ liệu. Không chọn gì -> hôm nay.
+    Chọn bằng tham số:  python sync.py 2026-11-10   (hoặc 10/11/2026)
+    hoặc biến môi trường NGAY_CHAY (tiện cho GitHub Actions / .env). Tham số dòng lệnh ưu tiên hơn."""
+    raw = (sys.argv[1] if len(sys.argv) > 1 else os.getenv("NGAY_CHAY", "")).strip()
+    if not raw:
+        return now_vn.date()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            d = datetime.datetime.strptime(raw, fmt).date()
+            break
+        except ValueError:
+            continue
+    else:
+        raise SystemExit(f"🛑 Ngày '{raw}' không hợp lệ. Dùng yyyy-mm-dd hoặc dd/mm/yyyy, vd: 2026-11-10")
+    if d > now_vn.date():
+        raise SystemExit(f"🛑 Ngày {d:%d/%m/%Y} ở tương lai, không thể điền.")
+    return d
+
+
 # ── CHUNG ───────────────────────────────────────────────────────
 def normalize_name(s: str) -> str:
     """Bỏ dấu, bỏ khoảng trắng thừa, chữ thường -> dùng để khớp tên."""
@@ -110,7 +133,7 @@ def to_dt(s):
         return None
 
 
-def api_get(url, params, retries=3):
+def api_get(url, params, retries=4):
     """Trả về (json, lỗi)."""
     last_error = ""
     for attempt in range(retries):
@@ -124,7 +147,10 @@ def api_get(url, params, retries=3):
                 time.sleep(2 * (attempt + 1)); continue
             data = res.json()
             if data.get("success") is False:
-                return None, f"API báo lỗi: {str(data)[:150]}"
+                last_error = f"API báo lỗi: {str(data)[:150]}"
+                if "try again" in str(data.get("message", "")).lower() and attempt < retries - 1:
+                    time.sleep(3 * (attempt + 1)); continue      # lỗi tạm thời phía Pancake -> thử lại
+                return None, last_error
             return data, ""
         except requests.RequestException:
             last_error = "Timeout/Lỗi mạng"
@@ -210,64 +236,106 @@ def fetch_unread(page_id, token, tu_luc):
                 dem[ten] = dem.get(ten, 0) + 1
         if het: break
         last_id = convs[-1].get("id")
-        time.sleep(0.2)
+        time.sleep(0.1)
     return dem, tk, ""
 
 
 # ── XỬ LÝ 1 KÊNH ────────────────────────────────────────────────
-def process_single_page(row, date_range, tu_luc):
+# Kích thước kênh (số hội thoại quét được ở lần chạy trước) -> chạy kênh LỚN trước để không phải chờ kênh lớn ở cuối.
+# Số mặc định lấy từ log thực tế; sau mỗi lần chạy script tự ghi đè vào file cache bên dưới.
+CACHE_KICH_THUOC = os.path.join(BASE_DIR, "kich_thuoc_kenh.json")
+KICH_THUOC_MAC_DINH = {
+    "facebook / DEME Uniform": 549, "shopee / Deme Uniform": 481, "zalo / Demeuniform": 331,
+    "facebook / Đồng Phục Cafe - DEME Uniform": 198, "facebook / Đồng Phục Doanh Nghiệp - DEME Uniform": 172,
+    "zalo / Anh Thư Đồng Phục Deme": 84, "shopee / DEME_STORE": 55, "zalo / DEME": 36,
+    "zalo / Deme Uniform G": 34, "tiktokshop / Deme Đồng Phục": 23,
+}
+
+
+def doc_kich_thuoc() -> dict:
+    kt = dict(KICH_THUOC_MAC_DINH)
+    try:
+        with open(CACHE_KICH_THUOC, encoding="utf-8") as f:
+            kt.update(json.load(f))
+    except Exception:
+        pass
+    return kt
+
+
+def ghi_kich_thuoc(moi: dict):
+    if not moi: return
+    kt = doc_kich_thuoc(); kt.update(moi)
+    try:
+        with open(CACHE_KICH_THUOC, "w", encoding="utf-8") as f:
+            json.dump(kt, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def process_single_page(row, date_range, tu_luc, lay_unread=True):
+    t0 = time.perf_counter()
     channel_name = f"{row['platform']} / {row['channel'] or '?'}"
     page_id, token = row["page_id"], row["access_token"]
 
     lead, unread = {}, {}
     if not token:
-        return lead, unread, f"  ⚠️ [BỎ QUA] {channel_name}: Thiếu token."
+        return lead, unread, f"  ⚠️ [BỎ QUA] {channel_name}: Thiếu token.", None
 
-    # 1. Lead / KH cũ: kênh chung -> 2 cột "kênh chung"; kênh Zalo cá nhân -> 2 cột "Zalo cá nhân"
     ca_nhan = bool(row["ca_nhan"])
     k_lead = "lead_zalo_cn" if ca_nhan else "lead_kenh_chung"
     k_khcu = "khcu_zalo_cn" if ca_nhan else "khcu_kenh_chung"
-    records, err_lead = fetch_engagement(page_id, token, date_range)
+    can_unread = lay_unread and not ca_nhan      # Zalo cá nhân / ngày cũ: không quét hội thoại chưa đọc
+
+    # Lead / KH cũ và hội thoại chưa đọc là 2 việc độc lập -> chạy SONG SONG trong cùng 1 kênh
+    with ThreadPoolExecutor(max_workers=2) as ex2:
+        f_unread = ex2.submit(fetch_unread, page_id, token, tu_luc) if can_unread else None
+        records, err_lead = fetch_engagement(page_id, token, date_range)
+        unread, tk, err_unread = f_unread.result() if f_unread else ({}, {}, "")
+
     for user in records:
         name = user.get("name", "Không rõ")
         kh_moi = int(get_field(user, "new_customer_replied_count", "new_customer") or 0)
         total_eng = int(get_field(user, "total_engagement", "total") or 0)
-        kh_cu = max(total_eng - kh_moi, 0)
         d = lead.setdefault(name, new_lead())
         d[k_lead] += kh_moi
-        d[k_khcu] += kh_cu
+        d[k_khcu] += max(total_eng - kh_moi, 0)
 
-    if ca_nhan:   # Zalo cá nhân: không đếm hội thoại chưa đọc
-        lead_txt = "❌ " + err_lead if err_lead else "✅"
-        return lead, unread, f"  {('[ZALO CN] ' + channel_name)[:43]:<44} {lead_txt:<6}"
-
-    # 2. Hội thoại chưa seen & khách nhắn cuối
-    unread, tk, err_unread = fetch_unread(page_id, token, tu_luc)
-
+    giay = f"{time.perf_counter() - t0:>5.1f}s"
     lead_txt = "❌ " + err_lead if err_lead else "✅"
+    if ca_nhan:
+        return lead, unread, f"  {('[ZALO CN] ' + channel_name)[:43]:<44} {lead_txt:<6} {giay}", None
+    if not can_unread:
+        return lead, unread, f"  {channel_name[:43]:<44} {lead_txt:<6} {giay}", None
     if err_unread:
         hd_txt = f"❌ {err_unread}"
     else:
         hd_txt = f"{tk['quet']:>5} {tk['chua_seen']:>10} {tk['khach_cuoi']:>16} {tk['ca_hai']:>10}"
-    msg = f"  {channel_name[:43]:<44} {lead_txt:<6} {hd_txt}"
-    return lead, unread, msg
+    kich_thuoc = (channel_name, tk["quet"]) if not err_unread else None
+    return lead, unread, f"  {channel_name[:43]:<44} {lead_txt:<6} {hd_txt}  {giay}", kich_thuoc
 
 
-def fetch_all(date_range, tu_luc):
+def fetch_all(date_range, tu_luc, lay_unread=True):
     channels = load_channels(CSV_FILE)
-    print(f"✅ Bắt đầu quét {len(channels)} kênh ({MAX_WORKERS} luồng song song)...\n")
-    print(f"  {'Kênh':<44} {'Lead':<6} {'Quét':>5} {'Chưa seen':>10} {'Khách nhắn cuối':>16} {'THỎA CẢ 2':>10}")
-    lead_tong, unread_tong = {}, {}
+    kt = doc_kich_thuoc()
+    channels = channels.assign(_kt=channels.apply(
+        lambda r: kt.get(f"{r['platform']} / {r['channel'] or '?'}", 0), axis=1)).sort_values("_kt", ascending=False)
+    print(f"✅ Bắt đầu quét {len(channels)} kênh ({MAX_WORKERS} luồng song song, kênh lớn chạy trước)...\n")
+    print(f"  {'Kênh':<44} {'Lead':<6} {'Quét':>5} {'Chưa seen':>10} {'Khách nhắn cuối':>16} {'THỎA CẢ 2':>10}  Thời gian")
+    lead_tong, unread_tong, kich_thuoc_moi = {}, {}, {}
+    t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = [ex.submit(process_single_page, row, date_range, tu_luc) for _, row in channels.iterrows()]
+        futures = [ex.submit(process_single_page, row, date_range, tu_luc, lay_unread) for _, row in channels.iterrows()]
         for f in as_completed(futures):
-            lead, unread, msg = f.result()
+            lead, unread, msg, kich = f.result()
             print(msg)
+            if kich: kich_thuoc_moi[kich[0]] = kich[1]
             for name, vals in lead.items():
                 d = lead_tong.setdefault(name, new_lead())
                 for k, v in vals.items(): d[k] += v
             for name, v in unread.items():
                 unread_tong[name] = unread_tong.get(name, 0) + v
+    ghi_kich_thuoc(kich_thuoc_moi)
+    print(f"\n⏱️ Quét Pancake mất {time.perf_counter() - t0:.1f}s")
     return lead_tong, unread_tong
 
 
@@ -339,7 +407,17 @@ def lark_list_items(token: str, app_token: str, table_id: str) -> list[dict]:
     while True:
         params = {"page_size": 500, "user_id_type": "open_id"}
         if page_token: params["page_token"] = page_token
-        data = SESSION.get(url, headers=headers, params=params, timeout=30).json()
+        data = {}
+        for lan in range(6):                       # Lark hay báo 1254607 "Data not ready" (tạm thời) -> chờ rồi thử lại
+            try:
+                data = SESSION.get(url, headers=headers, params=params, timeout=30).json()
+            except (requests.RequestException, ValueError):
+                data = {"code": -1, "msg": "Lỗi mạng / phản hồi không đọc được"}
+            if data.get("code") == 0: break
+            if data.get("code") not in (1254607, -1, 1254290, 1254291): break   # lỗi khác (quyền, sai ID...) -> không thử lại
+            cho = 3 * (lan + 1)
+            print(f"   ⚠️ Lark chưa sẵn sàng ({data.get('code')}), thử lại sau {cho}s ({lan + 1}/6)...")
+            time.sleep(cho)
         if data.get("code") != 0:
             raise RuntimeError(f"Lark list_records lỗi (table {table_id}): {data}")
         items.extend(data["data"].get("items") or [])
@@ -383,7 +461,7 @@ def lark_list_records(token: str) -> list[dict]:
     records = []
     for item in lark_list_items(token, LARK_BASE_APP_TOKEN, LARK_TABLE_ID):
         fields = item.get("fields", {})
-        ngay = parse_ngay(item.get("created_time")) or parse_ngay(fields.get(FIELD_NGAY))
+        ngay = parse_ngay(fields.get(FIELD_NGAY)) or parse_ngay(item.get("created_time"))   # ưu tiên cột Ngày
         records.append({
             "record_id": item["record_id"],
             "ngay": ngay,
@@ -393,6 +471,11 @@ def lark_list_records(token: str) -> list[dict]:
                                   _extract_text(fields.get(FIELD_CA)))),
         })
     return records
+
+
+def ngay_ra_ms(d: datetime.date) -> int:
+    """Ngày -> timestamp ms (12:00 giờ VN, để hiển thị đúng ngày ở mọi múi giờ gần VN)."""
+    return int(datetime.datetime(d.year, d.month, d.day, 12, 0, tzinfo=TZ_VN).timestamp() * 1000)
 
 
 def lark_batch_update(token: str, updates: list[dict]):
@@ -464,48 +547,70 @@ def lay_dang_ky_hom_nay(token: str, hom_nay: datetime.date) -> list[tuple[str, s
     return cap
 
 
-def dam_bao_ban_ghi_hom_nay(token: str, hom_nay: datetime.date, tat_ca: list[dict]) -> int:
-    """Mỗi (người, ca) đăng ký hôm nay phải có đúng 1 bản ghi hôm nay, cột 'Sales' + 'Ca làm' được điền.
-      1. Đã có bản ghi cùng người + cùng ca            -> giữ nguyên
-      2. Có bản ghi của người đó nhưng 'Ca làm' còn trống -> điền ca vào bản ghi đó
-      3. Còn lại                                        -> tạo bản ghi mới
-    Trả về số bản ghi đã tạo + đã điền ca."""
-    dang_ky = lay_dang_ky_hom_nay(token, hom_nay)
+def khoa_ca(s: str) -> str:
+    """Chuẩn hóa ca để so sánh: '08:30 - 18:00' / '8:30-18:00' -> '0830-1800'."""
+    s = re.sub(r"\s+", "", s or "").lower()
+    s = re.sub(r"(?<!\d)(\d):", r"0\1:", s)
+    return s.replace(":", "").replace("h", "")
+
+
+def lap_ke_hoach(dang_ky, tat_ca, hom_nay):
+    """So khớp THEO SỐ LƯỢNG, theo từng người:
+         số bản ghi hôm nay của người đó  phải  = số ca người đó đăng ký hôm nay.
+       - Đã đủ / dư  -> không tạo thêm (không bao giờ xóa).
+       - Thiếu       -> chỉ tạo phần thiếu.
+       - Bản ghi có sẵn mà 'Ca làm' trống / khác đăng ký -> sửa lại cho đúng ca.
+       Chỉ nhìn bản ghi có ngày == hôm nay; bản ghi ngày cũ không được đụng tới."""
     hom_nay_recs = [r for r in tat_ca if r["ngay"] == hom_nay]
-    da_dung = set()
-
-    def tim(pid, ca):
-        for r in hom_nay_recs:
-            if r["record_id"] in da_dung or r["ca"] != ca: continue
-            if any(p["id"] == pid for p in r["nguoi"]):
-                return r
-        return None
-
-    chua_khop = []
-    for pid, ten, ca in dang_ky:                       # lượt 1: khớp đúng người + ca
-        r = tim(pid, ca)
-        if r: da_dung.add(r["record_id"])
-        else: chua_khop.append((pid, ten, ca))
+    theo_nguoi = {}
+    for pid, ten, ca in dang_ky:
+        theo_nguoi.setdefault(pid, []).append((ten, ca))
 
     dien_ca, can_tao = [], []
-    for pid, ten, ca in chua_khop:                     # lượt 2: bản ghi cùng người còn trống ca
-        r = tim(pid, "")
-        if r:
-            da_dung.add(r["record_id"])
-            dien_ca.append({"record_id": r["record_id"], "fields": {FIELD_CA: ca}})
-        else:
-            can_tao.append((pid, ten, ca))
+    for pid, ds in theo_nguoi.items():
+        recs = [r for r in hom_nay_recs if any(p["id"] == pid for p in r["nguoi"])]
+        dung = set()
+        con_lai = []
+        for ten, ca in ds:                         # 1) bản ghi đã đúng ca -> giữ nguyên
+            r = next((r for r in recs if r["record_id"] not in dung and khoa_ca(r["ca"]) == khoa_ca(ca)), None)
+            if r: dung.add(r["record_id"])
+            else: con_lai.append((ten, ca))
+        for ten, ca in con_lai:                    # 2) còn bản ghi của người đó -> dùng lại, sửa ca
+            r = next((r for r in recs if r["record_id"] not in dung), None)
+            if r:
+                dung.add(r["record_id"])
+                dien_ca.append({"record_id": r["record_id"], "fields": {FIELD_CA: ca}})
+            else:                                  # 3) thật sự thiếu -> tạo mới
+                can_tao.append((pid, ten, ca))
+    return dien_ca, can_tao
+
+
+def dam_bao_ban_ghi_hom_nay(token: str, hom_nay: datetime.date, tat_ca: list[dict]) -> int:
+    """Mỗi ngày: số bản ghi của từng người = số ca người đó đăng ký (bảng Đăng ký ca, bỏ OFF/NP).
+    Sang ngày mới chỉ tạo bản ghi của ngày mới, KHÔNG sửa / xóa / cập nhật bản ghi ngày cũ.
+    Trả về số bản ghi đã tạo + đã sửa ca."""
+    dang_ky = lay_dang_ky_hom_nay(token, hom_nay)
+    dien_ca, can_tao = lap_ke_hoach(dang_ky, tat_ca, hom_nay)
 
     if not dien_ca and not can_tao:
         print("✅ Bản ghi hôm nay đã đủ, không cần tạo / điền thêm.")
         return 0
-    print(f"➕ Tạo mới {len(can_tao)} bản ghi, điền ca cho {len(dien_ca)} bản ghi sẵn có.")
+
+    if can_tao and not DRY_RUN:
+        # Đọc lại bảng ngay trước khi tạo: tránh tạo trùng nếu có lần chạy khác vừa tạo xong
+        time.sleep(2)
+        tat_ca = lark_list_records(token)
+        dien_ca, can_tao = lap_ke_hoach(dang_ky, tat_ca, hom_nay)
+
+    print(f"➕ Tạo mới {len(can_tao)} bản ghi, sửa ca cho {len(dien_ca)} bản ghi sẵn có "
+          f"(đăng ký hôm nay: {len(dang_ky)} ca).")
     if LOG_THEO_SALE:
         print("   tạo: " + ", ".join(f"{t} ({c})" for _, t, c in can_tao))
     if DRY_RUN:
         print("   🛑 DRY_RUN=True — chưa tạo / điền."); return 0
     lark_batch_update(token, dien_ca)
-    moi = [{"fields": {FIELD_SALES: [{"id": pid}], FIELD_CA: ca}} for pid, _, ca in can_tao]
+    ms = ngay_ra_ms(hom_nay)
+    moi = [{"fields": {FIELD_SALES: [{"id": pid}], FIELD_CA: ca, FIELD_NGAY: ms}} for pid, _, ca in can_tao]
     tao = lark_batch_create(token, moi)
     print(f"   ✅ Đã tạo {tao}/{len(moi)} bản ghi mới.")
     return tao + len(dien_ca)
@@ -547,10 +652,13 @@ def main():
     if not PERSONAL_ZALO_PAGE_IDS:
         raise SystemExit("🛑 Thiếu PERSONAL_ZALO_PAGE_IDS — không biết kênh nào là Zalo cá nhân để bỏ qua.")
     now_vn = datetime.datetime.now(TZ_VN)
-    hom_nay = now_vn.date()
-    date_range = f"{now_vn:%d/%m/%Y} 00:00:00 - {now_vn:%d/%m/%Y %H:%M:%S}"
+    hom_nay = chon_ngay_chay(now_vn)                 # mặc định = hôm nay; có thể chọn ngày cũ để điền lại
+    la_hom_nay = hom_nay == now_vn.date()
+    cuoi_ngay = f"{now_vn:%H:%M:%S}" if la_hom_nay else "23:59:59"
+    date_range = f"{hom_nay:%d/%m/%Y} 00:00:00 - {hom_nay:%d/%m/%Y} {cuoi_ngay}"
     tu_luc = now_vn - datetime.timedelta(hours=SO_GIO_CHUA_DOC)
-    print(f"🚀 Chạy lúc {now_vn:%d/%m/%Y %H:%M:%S} | DRY_RUN={DRY_RUN}")
+    print(f"🚀 Chạy lúc {now_vn:%d/%m/%Y %H:%M:%S} | DRY_RUN={DRY_RUN} | Ngày điền: {hom_nay:%d/%m/%Y}"
+          + ("" if la_hom_nay else "  (NGÀY CŨ: vẫn tạo bản ghi thiếu, nhưng không ghi 'Số hội thoại chưa phản hồi')"))
     print(f"   Lead: {date_range} | Chưa đọc: từ {tu_luc:%d/%m %H:%M}\n")
 
     # ── BƯỚC 1: đảm bảo đã có bản ghi hôm nay cho từng người đăng ký ca ──
@@ -558,8 +666,8 @@ def main():
     token = lark_get_tenant_token()
     tat_ca = lark_list_records(token)
     if tat_ca and all(r["ngay"] is None for r in tat_ca):
-        raise SystemExit(f"🛑 Không đọc được ngày tạo của bản ghi nào (created_time / cột '{FIELD_NGAY}'). "
-                         f"Dừng để tránh tạo trùng -- kiểm tra cột '{FIELD_NGAY}' kiểu Created time ở bảng đích.")
+        raise SystemExit(f"🛑 Không đọc được ngày của bản ghi nào (cột '{FIELD_NGAY}'). "
+                         f"Dừng để tránh tạo trùng -- kiểm tra cột '{FIELD_NGAY}' (kiểu Date) ở bảng đích.")
     if dam_bao_ban_ghi_hom_nay(token, hom_nay, tat_ca) > 0:
         time.sleep(3)                         # chờ Lark tính xong các cột công thức / lookup của bản ghi mới
         tat_ca = lark_list_records(token)
@@ -570,7 +678,7 @@ def main():
         print(f"⚠️ {thieu_ten} bản ghi hôm nay chưa có '{FIELD_MATCH}' -> sẽ không khớp được số liệu Pancake.")
 
     # ── BƯỚC 2: lấy số liệu Pancake ──
-    lead_tong, unread_tong = fetch_all(date_range, tu_luc)
+    lead_tong, unread_tong = fetch_all(date_range, tu_luc, la_hom_nay)
     print(f"\n✅ Gom xong: lead {len(lead_tong)} nhân viên")
     print(f"   Hội thoại chưa seen & khách nhắn cuối: {sum(unread_tong.values())}")
     if LOG_THEO_SALE:
@@ -610,7 +718,9 @@ def main():
         }
 
         # 2. Hội thoại chưa đọc
-        if not LOC_THEO_CA or dang_trong_ca(r["ca"], now_vn):
+        if not la_hom_nay:
+            chua_doc = "(bỏ qua - ngày cũ)"           # số hội thoại chưa đọc chỉ phản ánh hiện tại, không điền cho ngày cũ
+        elif not LOC_THEO_CA or dang_trong_ca(r["ca"], now_vn):
             chua_doc = int(unread_norm.get(key, 0))      # cột dạng Số -> gửi số
             fields[FIELD_CHUA_PHAN_HOI] = chua_doc
         else:
