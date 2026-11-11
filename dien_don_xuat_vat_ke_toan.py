@@ -91,6 +91,9 @@ COT = {
 # Xét từ trên xuống, gặp từ khoá đầu tiên có trong Mã mẫu mã (không phân biệt hoa thường) thì lấy tên đó.
 # Không khớp từ khoá nào -> lấy Mã sản phẩm. Thêm / sửa loại hàng: sửa danh sách này.
 QUY_TAC_TEN_HANG = [
+    (["áo gile"], "Áo gile đồng phục"),
+    (["mũ lưỡi trai", "mũ nửa đầu"], "Nón đồng phục"),
+    (["tạp dề ngắn xẻ giữa"], "Tạp dề ngắn xẻ giữa"),
     (["mũ"], "Mũ đồng phục"),
     (["nón"], "Nón đồng phục"),
     (["snapfit workwear"], "Tạp dề chống nước có cúc"),
