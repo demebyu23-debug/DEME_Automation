@@ -3,7 +3,9 @@ import time
 import requests
 import json
 import ast
+import threading
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -24,8 +26,18 @@ MAX_RETRIES = 3
 MAX_PANCAKE_PAGES = 300
 UPDATED_WITHIN_DAYS = 5  # QUÉT CÁC ĐƠN CẬP NHẬT TRONG 5 NGÀY QUA (tính đến lúc chạy)
 
-# BƯỚC 5: DỌN TOÀN BẢNG (chạy mỗi lần, không giới hạn 5 ngày)
-# Xóa dòng mẹ trùng: 2 dòng mẹ cùng ID chốt (VD dòng 206847 đã ghi ID mới 207884, và 1 dòng 207884 do code tạo
+# ================== TỐC ĐỘ ==================
+PANCAKE_PAGE_SIZE = 500     # số đơn / trang khi tải Pancake (trước là 50)
+SO_LUONG_SONG_SONG = 3      # số yêu cầu chạy song song (tải Pancake, tìm trên Lark)
+LARK_TOI_DA_MOI_GIAY = 5    # giới hạn số lần gọi Lark / giây (chung cho mọi luồng) để không bị TooManyRequest
+SO_ID_MOI_LAN_TIM = 20      # số ID gộp trong 1 lần tìm trên Lark (mỗi ID = 2 điều kiện ID / ID mới)
+SO_DONG_MOI_LO_GHI = 500    # số dòng / 1 lần ghi Lark (trước là 100)
+# BƯỚC 5 dọn mẹ trùng:
+#   mặc định  = chỉ dọn trong các đơn vừa quét (nhanh, đủ cho chạy hằng ngày)
+#   DON_TOAN_BANG=1 (biến môi trường) = đọc TOÀN BẢNG như trước (chậm, nên chạy định kỳ, vd 1 lần/tuần)
+DON_TOAN_BANG = os.getenv("DON_TOAN_BANG", "").strip() == "1"
+
+# BƯỚC 5: Xóa dòng mẹ trùng: 2 dòng mẹ cùng ID chốt (VD dòng 206847 đã ghi ID mới 207884, và 1 dòng 207884 do code tạo
 # trước khi ghi ID mới). Giữ dòng nối tay, xóa dòng do code tạo.
 XOA_ME_TRUNG = True
 # True = dòng mẹ trùng do code tạo ĐÃ CÓ CON vẫn được xóa (xóa cả các dòng con của nó),
@@ -89,19 +101,45 @@ def cung_cong_ty(lark_fields, pos_fields):
     return False
 
 
+_khoa_lark = threading.Lock()
+_lan_goi_lark_cuoi = [0.0]
+
+
+def _cho_luot_lark():
+    """Giãn các lần gọi Lark: tối đa LARK_TOI_DA_MOI_GIAY lần / giây, dùng chung cho mọi luồng."""
+    with _khoa_lark:
+        cho = _lan_goi_lark_cuoi[0] + 1.0 / LARK_TOI_DA_MOI_GIAY - time.time()
+        if cho > 0: time.sleep(cho)
+        _lan_goi_lark_cuoi[0] = time.time()
+
+
 def request_with_retry(method, url, **kwargs):
-    for attempt in range(1, MAX_RETRIES + 1):
+    timeout = kwargs.pop("timeout", 30)
+    la_lark = "larksuite.com" in url
+    attempt, so_lan_qua_tai = 0, 0
+    while attempt < MAX_RETRIES:
+        attempt += 1
         try:
-            resp = requests.request(method, url, timeout=30, **kwargs)
+            if la_lark: _cho_luot_lark()
+            resp = requests.request(method, url, timeout=timeout, **kwargs)
             if resp.status_code == 200:
                 try:
                     body = resp.json()
                 except ValueError:
                     return resp
+                # Lark báo quá tải: chờ 1-2 giây rồi gọi lại, không tính vào số lần thử (tối đa 10 lần)
+                if isinstance(body, dict) and body.get("code") in (1254290, 1254291) and so_lan_qua_tai < 10:
+                    so_lan_qua_tai += 1; attempt -= 1
+                    time.sleep(1 + so_lan_qua_tai * 0.5)
+                    continue
                 if isinstance(body, dict) and "code" in body and body["code"] != 0:
                     print(f"    [LARK LỖI code={body.get('code')}] {body.get('msg')} - thử lại ({attempt}/{MAX_RETRIES})...")
                 else:
                     return resp
+            elif resp.status_code == 429 and so_lan_qua_tai < 10:
+                so_lan_qua_tai += 1; attempt -= 1
+                time.sleep(1 + so_lan_qua_tai * 0.5)
+                continue
             else:
                 print(f"    [HTTP {resp.status_code}] thử lại ({attempt}/{MAX_RETRIES})...")
         except requests.exceptions.RequestException as e:
@@ -174,30 +212,38 @@ def get_lark_token():
     return resp.json().get("tenant_access_token") if resp is not None else None
 
 
-def _search_ids(headers, records_url, id_values, all_items, seen_record_ids):
-    CHUNK = 15
-    for i in range(0, len(id_values), CHUNK):
-        chunk_ids = [str(v) for v in id_values[i:i + CHUNK]]
-        conditions = []
-        for val in chunk_ids:
-            conditions.append({"field_name": "ID", "operator": "is", "value": [val]})
-            conditions.append({"field_name": "ID mới", "operator": "is", "value": [val]})
+def _tim_mot_cum(headers, records_url, chunk_ids):
+    """Tìm 1 cụm ID trên Lark, đọc hết các trang.
+    page_size / page_token phải nằm trên URL (bản cũ để trong body nên Lark bỏ qua, mỗi trang chỉ trả 20 dòng)."""
+    conditions = []
+    for val in chunk_ids:
+        conditions.append({"field_name": "ID", "operator": "is", "value": [val]})
+        conditions.append({"field_name": "ID mới", "operator": "is", "value": [val]})
+    payload = {"filter": {"conjunction": "or", "conditions": conditions}}
+    out, page_token = [], ""
+    while True:
+        params = {"page_size": 500}
+        if page_token: params["page_token"] = page_token
+        resp = request_with_retry("POST", f"{records_url}/search", headers=headers, params=params, json=payload)
+        if resp is None: break
+        data = resp.json().get("data", {}) or {}
+        out += data.get("items") or []
+        if not data.get("has_more"): break
+        page_token = data.get("page_token", "")
+    return out
 
-        payload = {"filter": {"conjunction": "or", "conditions": conditions}, "page_size": 500}
-        page_token = ""
-        has_more = True
-        while has_more:
-            if page_token: payload["page_token"] = page_token
-            resp = request_with_retry("POST", f"{records_url}/search", headers=headers, json=payload)
-            if resp is None: break
-            data = resp.json().get("data", {})
-            for item in data.get("items", []):
+
+def _search_ids(headers, records_url, id_values, all_items, seen_record_ids):
+    """Tìm theo cụm SO_ID_MOI_LAN_TIM ID, các cụm chạy song song."""
+    ids = [str(v) for v in id_values]
+    cum = [ids[i:i + SO_ID_MOI_LAN_TIM] for i in range(0, len(ids), SO_ID_MOI_LAN_TIM)]
+    with ThreadPoolExecutor(max_workers=SO_LUONG_SONG_SONG) as ex:
+        for items in ex.map(lambda c: _tim_mot_cum(headers, records_url, c), cum):
+            for item in items:
                 rid = item.get("record_id")
                 if rid not in seen_record_ids:
                     seen_record_ids.add(rid)
                     all_items.append(item)
-            has_more = data.get("has_more", False)
-            page_token = data.get("page_token", "")
 
 
 def search_lark_records_by_ids(headers, records_url, id_values):
@@ -265,13 +311,20 @@ def chunk_list(lst, n):
         yield lst[i:i + n]
 
 
-def batch_execute_lark(headers, records_url, items, action="create"):
+def batch_execute_lark(headers, records_url, items, action="create", ket_qua=None):
+    """Ghi theo lô SO_DONG_MOI_LO_GHI dòng.
+    ket_qua (list): nếu truyền vào, thêm {record_id, fields} của các dòng ghi thành công (để bước sau khỏi tìm lại)."""
     count = 0
     endpoint = f"{records_url}/batch_create" if action == "create" else f"{records_url}/batch_update"
-    for chunk in chunk_list(items, 100):
-        resp = request_with_retry("POST", endpoint, headers=headers, json={"records": chunk})
+    for chunk in chunk_list(items, SO_DONG_MOI_LO_GHI):
+        resp = request_with_retry("POST", endpoint, headers=headers, json={"records": chunk}, timeout=120)
         if resp is not None:
-            count += len(resp.json().get("data", {}).get("records", []))
+            recs = resp.json().get("data", {}).get("records", []) or []
+            count += len(recs)
+            if ket_qua is not None:
+                for goc, rec in zip(chunk, recs):
+                    if rec.get("record_id"):
+                        ket_qua.append({"record_id": rec["record_id"], "fields": dict(goc.get("fields") or {})})
     return count
 
 
@@ -280,7 +333,7 @@ def lay_toan_bang(headers, records_url):
     while True:
         params = {"page_size": 500}
         if page_token: params["page_token"] = page_token
-        resp = request_with_retry("GET", records_url, headers=headers, params=params)
+        resp = request_with_retry("GET", records_url, headers=headers, params=params, timeout=120)
         if resp is None: break
         d = resp.json().get("data", {}) or {}
         items += d.get("items") or []
@@ -337,8 +390,9 @@ def chon_me_chinh(ds, main_id):
     return sorted(ds, key=diem, reverse=True)
 
 
-def don_dep_toan_bang(headers, records_url):
-    """BƯỚC 5: quét toàn bảng, xử lý dòng mẹ trùng ID chốt.
+def don_dep_toan_bang(headers, records_url, items=None):
+    """BƯỚC 5: xử lý dòng mẹ trùng ID chốt.
+    items = None -> đọc toàn bảng (như trước); có items -> chỉ xét các dòng của các đơn vừa quét.
     - Giữ dòng 'chính' (có ID mới nối tay / nhiều con / nhiều dữ liệu).
     - Chép MST, Tên đơn vị... sang dòng chính nếu dòng chính còn trống.
     - Xóa dòng trùng KHÔNG có con (như trước).
@@ -346,12 +400,15 @@ def don_dep_toan_bang(headers, records_url):
       nếu dòng trùng do code tạo (cột ID = ID chốt) và cả dòng mẹ lẫn các dòng con của nó không có dữ liệu
       nhập tay nào khác với dòng được giữ -> xóa cả mẹ trùng và các con của nó.
       Ngược lại -> chỉ báo để kiểm tra tay, nêu rõ cột nào đang có dữ liệu riêng."""
-    print("\n--- BƯỚC 5: DỌN TOÀN BẢNG (mẹ trùng ID chốt) ---")
-    items = lay_toan_bang(headers, records_url)
+    if items is None:
+        print("\n--- BƯỚC 5: DỌN TOÀN BẢNG (mẹ trùng ID chốt) ---")
+        items = lay_toan_bang(headers, records_url)
+    else:
+        print("\n--- BƯỚC 5: DỌN MẸ TRÙNG TRONG CÁC ĐƠN VỪA QUÉT ---")
     loai_cot = lay_loai_cot(headers, records_url)
     fields_theo_rec = {it.get("record_id"): it.get("fields") or {} for it in items}
     roots, _ = build_records_map_from_items(items)
-    print(f"-> Bảng có {len(items)} dòng, {len(roots)} dòng mẹ")
+    print(f"-> Xét {len(items)} dòng, {len(roots)} dòng mẹ")
 
     theo_id_chot = {}
     for r in roots:
@@ -417,7 +474,33 @@ def don_dep_toan_bang(headers, records_url):
     return xoa_me
 
 
+def tai_don_pancake(start_ts, end_ts):
+    """Tải trang 1 để biết tổng số trang, rồi tải các trang còn lại song song. Trả về list đơn theo thứ tự trang."""
+    url = f"https://pos.pages.fm/api/v1/shops/{PANCAKE_SHOP_ID}/orders"
+
+    def tai_trang(page):
+        params = {"api_key": PANCAKE_API_KEY, "page_number": page, "page_size": PANCAKE_PAGE_SIZE,
+                  "status": "-1", "updateStatus": "updated_at",
+                  "startDateTime": start_ts, "endDateTime": end_ts}
+        resp = request_with_retry("GET", url, params=params, timeout=120)
+        if resp is None:
+            print(f"    !! Bỏ qua trang {page} sau {MAX_RETRIES} lần lỗi")
+            return {}
+        return resp.json() or {}
+
+    trang_1 = tai_trang(1)
+    tong_trang = min(int(trang_1.get("total_pages") or 1), MAX_PANCAKE_PAGES)
+    orders = list(trang_1.get("data") or [])
+    if tong_trang > 1:
+        with ThreadPoolExecutor(max_workers=SO_LUONG_SONG_SONG) as ex:
+            for body in ex.map(tai_trang, range(2, tong_trang + 1)):
+                orders.extend(body.get("data") or [])
+    print(f"-> Tải {len(orders)} đơn ({tong_trang} trang)")
+    return orders
+
+
 def main():
+    t0 = time.time()
     thieu = [k for k, v in {"PANCAKE_API_KEY": PANCAKE_API_KEY, "PANCAKE_SHOP_ID": PANCAKE_SHOP_ID,
                             "LARK_APP_ID": LARK_APP_ID, "LARK_APP_SECRET": LARK_APP_SECRET,
                             "LARK_BASE_APP_TOKEN": LARK_APP_TOKEN}.items() if not v]
@@ -438,102 +521,82 @@ def main():
 
     print(f"\n--- BƯỚC 1: TẢI ĐƠN PANCAKE (Cập nhật trong {UPDATED_WITHIN_DAYS} ngày qua) ---")
 
-    page_num = 1
-    keep_fetching = True
     all_valid_orders = []
+    for order in tai_don_pancake(start_ts, end_ts):
+        # LỌC THẺ: chỉ lấy đơn có "VAT cá nhân" hoặc "VAT công ty"
+        tags = order.get("tags") or []
+        tag_names = {normalize_tag(t.get("name")) for t in tags if isinstance(t, dict)}
+        has_vat = bool(tag_names & VAT_TAGS)
+        has_khac_phuc = TAG_KHAC_PHUC in tag_names
 
-    while keep_fetching and page_num <= MAX_PANCAKE_PAGES:
-        url = f"https://pos.pages.fm/api/v1/shops/{PANCAKE_SHOP_ID}/orders"
+        if not has_vat: continue
 
-        api_params = {
-            "api_key": PANCAKE_API_KEY, "page_number": page_num, "page_size": 50,
-            "status": "-1",
-            "updateStatus": "updated_at",
-            "startDateTime": start_ts, "endDateTime": end_ts
+        # CHỈ "VAT cá nhân" (không có "VAT công ty") -> không xuất thông tin công ty
+        chi_ca_nhan = (TAG_VAT_CA_NHAN in tag_names) and (TAG_VAT_CONG_TY not in tag_names)
+
+        system_id = str(order.get("system_id") or "").strip()
+        if not system_id: continue
+
+        items = order.get("items") or []
+        total_qty = sum(int(it.get("quantity") or 0) for it in items)
+        if total_qty <= 0: continue
+
+        customer = order.get("customer") or {}
+        shipping = order.get("shipping_address") or {}
+        company = customer.get("company_info") or {}
+
+        phones = customer.get("phone_numbers") or []
+        cust_phone = phones[0] if phones else ""
+        ship_phone = shipping.get("phone_number") or ""
+        comp_phone = company.get("company_phone") if company else ""
+
+        customer_phone = str(ship_phone).strip() if str(ship_phone).strip() else str(cust_phone).strip()
+        company_phone = "" if chi_ca_nhan else str(comp_phone or "").strip()
+
+        if not customer_phone and not company_phone: continue
+
+        cust_emails = customer.get("emails") or []
+        order_email = order.get("bill_email") or (cust_emails[0] if cust_emails else "")
+
+        desired_fields = {
+            "Tên người mua": shipping.get("full_name") or customer.get("name") or "",
+            "CCCD": customer.get("identity_code") or "",
         }
-        resp = request_with_retry("GET", url, params=api_params)
-        if resp is None: break
 
-        orders = resp.json().get("data", [])
-        if not orders: break
+        # Đơn chỉ "VAT cá nhân": bỏ qua company_info của POS dù khách có lưu thông tin công ty
+        pos_has_company = bool(company and company.get("company_name")) and not chi_ca_nhan
 
-        for order in orders:
-            # LỌC THẺ: chỉ lấy đơn có "VAT cá nhân" hoặc "VAT công ty"
-            tags = order.get("tags") or []
-            tag_names = {normalize_tag(t.get("name")) for t in tags if isinstance(t, dict)}
-            has_vat = bool(tag_names & VAT_TAGS)
-            has_khac_phuc = TAG_KHAC_PHUC in tag_names
+        if pos_has_company:
+            desired_fields["MST"] = chuan_mst(company.get("company_tax_id"))
+            desired_fields["Tên đơn vị"] = company.get("company_name") or ""
+            desired_fields["Địa chỉ"] = company.get("company_address") or ""
+            desired_fields["SĐT"] = company_phone if company_phone else customer_phone
+            desired_fields["Email nhận hóa đơn"] = company.get("company_email") or order_email or ""
+        else:
+            desired_fields["Địa chỉ"] = shipping.get("full_address") or ""
+            desired_fields["SĐT"] = customer_phone if customer_phone else company_phone
+            desired_fields["MST"] = ""
+            desired_fields["Tên đơn vị"] = ""
+            desired_fields["Email nhận hóa đơn"] = order_email or ""
 
-            if not has_vat: continue
-
-            # CHỈ "VAT cá nhân" (không có "VAT công ty") -> không xuất thông tin công ty
-            chi_ca_nhan = (TAG_VAT_CA_NHAN in tag_names) and (TAG_VAT_CONG_TY not in tag_names)
-
-            system_id = str(order.get("system_id") or "").strip()
-            if not system_id: continue
-
-            items = order.get("items") or []
-            total_qty = sum(int(it.get("quantity") or 0) for it in items)
-            if total_qty <= 0: continue
-
-            customer = order.get("customer") or {}
-            shipping = order.get("shipping_address") or {}
-            company = customer.get("company_info") or {}
-
-            phones = customer.get("phone_numbers") or []
-            cust_phone = phones[0] if phones else ""
-            ship_phone = shipping.get("phone_number") or ""
-            comp_phone = company.get("company_phone") if company else ""
-
-            customer_phone = str(ship_phone).strip() if str(ship_phone).strip() else str(cust_phone).strip()
-            company_phone = "" if chi_ca_nhan else str(comp_phone or "").strip()
-
-            if not customer_phone and not company_phone: continue
-
-            cust_emails = customer.get("emails") or []
-            order_email = order.get("bill_email") or (cust_emails[0] if cust_emails else "")
-
-            desired_fields = {
-                "Tên người mua": shipping.get("full_name") or customer.get("name") or "",
-                "CCCD": customer.get("identity_code") or "",
-            }
-
-            # Đơn chỉ "VAT cá nhân": bỏ qua company_info của POS dù khách có lưu thông tin công ty
-            pos_has_company = bool(company and company.get("company_name")) and not chi_ca_nhan
-
-            if pos_has_company:
-                desired_fields["MST"] = chuan_mst(company.get("company_tax_id"))
-                desired_fields["Tên đơn vị"] = company.get("company_name") or ""
-                desired_fields["Địa chỉ"] = company.get("company_address") or ""
-                desired_fields["SĐT"] = company_phone if company_phone else customer_phone
-                desired_fields["Email nhận hóa đơn"] = company.get("company_email") or order_email or ""
-            else:
-                desired_fields["Địa chỉ"] = shipping.get("full_address") or ""
-                desired_fields["SĐT"] = customer_phone if customer_phone else company_phone
-                desired_fields["MST"] = ""
-                desired_fields["Tên đơn vị"] = ""
-                desired_fields["Email nhận hóa đơn"] = order_email or ""
-
-            all_valid_orders.append({
-                "system_id": system_id,
-                "fields": desired_fields,
-                "has_khac_phuc": has_khac_phuc,
-                "has_company": pos_has_company,
-                "chi_ca_nhan": chi_ca_nhan
-            })
-
-        page_num += 1
+        all_valid_orders.append({
+            "system_id": system_id,
+            "fields": desired_fields,
+            "has_khac_phuc": has_khac_phuc,
+            "has_company": pos_has_company,
+            "chi_ca_nhan": chi_ca_nhan
+        })
 
     all_valid_orders.reverse()
     pancake_data_map = {item["system_id"]: item for item in all_valid_orders}
     system_ids_to_fetch = list(pancake_data_map.keys())
 
-    print(f"-> Đã gom được {len(all_valid_orders)} đơn đạt chuẩn từ Pancake.")
+    print(f"-> Đã gom được {len(all_valid_orders)} đơn đạt chuẩn từ Pancake. ({time.time() - t0:.0f} giây)")
 
     print(f"\n--- BƯỚC 2: TRA CỨU ID LIÊN QUAN TRÊN LARK ---")
     matched_items = search_lark_records_by_ids(headers, records_url, system_ids_to_fetch)
     lark_roots, sys_id_to_root = build_records_map_from_items(matched_items)
-    print(f"-> Tìm thấy {len(matched_items)} bản ghi có liên quan trên Lark.")
+    print(f"-> Tìm thấy {len(matched_items)} bản ghi có liên quan trên Lark. ({time.time() - t0:.0f} giây)")
 
     print("\n--- BƯỚC 3: PHÂN LOẠI & CẬP NHẬT/TẠO MỚI ---")
     moms_to_create = []
@@ -615,9 +678,19 @@ def main():
         print(f"-> Trong đó {so_xoa_cong_ty} đơn mẹ chỉ có thẻ VAT cá nhân sẽ bị xóa thông tin công ty.")
     updated_count = batch_execute_lark(headers, records_url, records_to_update, action="update") if records_to_update else 0
     added_moms_count = batch_execute_lark(headers, records_url, moms_to_create, action="create") if moms_to_create else 0
+    print(f"   ({time.time() - t0:.0f} giây)")
 
     print("\n--- BƯỚC 4: KIỂM TRA & TẠO BẢN GHI CON THIẾU ---")
-    fresh_items = search_lark_records_by_ids(headers, records_url, system_ids_to_fetch)
+    # Không tìm lại toàn bộ: dữ liệu bước 2 đã có (đã cập nhật trong bộ nhớ ở bước 3).
+    # Chỉ tìm lại các đơn mẹ vừa tạo, để Lark tính xong cột "Số hàng hóa" cho chúng.
+    fresh_items = list(matched_items)
+    if moms_to_create:
+        id_me_moi = [m["fields"]["ID"] for m in moms_to_create]
+        da_co = {it.get("record_id") for it in fresh_items}
+        for it in search_lark_records_by_ids(headers, records_url, id_me_moi):
+            if it.get("record_id") not in da_co:
+                da_co.add(it.get("record_id"))
+                fresh_items.append(it)
     fresh_lark_roots, _ = build_records_map_from_items(fresh_items)
 
     seen_rec_ids = set()
@@ -649,12 +722,19 @@ def main():
             for _ in range(needed_subs):
                 subs_to_create.append({"fields": safe_sub_fields})
 
-    added_subs_count = batch_execute_lark(headers, records_url, subs_to_create, action="create") if subs_to_create else 0
+    con_moi = []
+    added_subs_count = batch_execute_lark(headers, records_url, subs_to_create, action="create",
+                                          ket_qua=con_moi) if subs_to_create else 0
+    fresh_items += con_moi   # dòng con vừa tạo -> đưa vào để bước 5 tính đúng số con
 
-    print(f"-> Thêm con: {added_subs_count}")
+    print(f"-> Thêm con: {added_subs_count} ({time.time() - t0:.0f} giây)")
 
-    xoa_me = don_dep_toan_bang(headers, records_url)
-    print(f"\n✅ HOÀN TẤT TOÀN BỘ! Thêm mẹ: {added_moms_count} | Cập nhật dòng: {updated_count} | Thêm con: {added_subs_count} | Xóa mẹ trùng: {xoa_me}.")
+    if DON_TOAN_BANG:
+        xoa_me = don_dep_toan_bang(headers, records_url)
+    else:
+        xoa_me = don_dep_toan_bang(headers, records_url, items=fresh_items)
+    print(f"\n✅ HOÀN TẤT TOÀN BỘ sau {time.time() - t0:.0f} giây! Thêm mẹ: {added_moms_count} | Cập nhật dòng: {updated_count} "
+          f"| Thêm con: {added_subs_count} | Xóa mẹ trùng: {xoa_me}.")
 
 
 if __name__ == "__main__":
