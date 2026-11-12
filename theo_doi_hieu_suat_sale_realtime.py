@@ -474,9 +474,8 @@ def lark_list_records(token: str) -> list[dict]:
 
 
 def ngay_ra_ms(d: datetime.date) -> int:
-    """Ngày -> timestamp ms (12:00 giờ VN, để hiển thị đúng ngày ở mọi múi giờ gần VN)."""
-    return int(datetime.datetime(d.year, d.month, d.day, 12, 0, tzinfo=TZ_VN).timestamp() * 1000)
-
+    """Ngày -> timestamp ms (00:00 giờ VN)."""
+    return int(datetime.datetime(d.year, d.month, d.day, 0, 0, tzinfo=TZ_VN).timestamp() * 1000)
 
 def lark_batch_update(token: str, updates: list[dict]):
     if not updates: return
