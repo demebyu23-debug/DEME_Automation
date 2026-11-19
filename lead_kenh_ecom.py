@@ -1,5 +1,7 @@
 import os
+import io
 import csv
+import base64
 import sys
 import time
 import datetime
@@ -20,11 +22,15 @@ RUN_DATE_TO   = os.getenv("RUN_DATE_TO", "").strip()
 # Public API: /pages/{page_id}/statistics/pages, dùng page_access_token riêng từng trang (cột access_token trong CSV)
 BASE_URL = "https://pages.fm/api/public_api/v1"
 
+# Page ID của kênh Zalo / Deme Uniform (token lấy trong secret PAGES_CONFIG_CSV_B64 theo page_id này)
+ID_ZALO_DEME_UNIFORM = "pzl_759480667788997165"
+PAGES_CONFIG_CSV_B64 = os.getenv("PAGES_CONFIG_CSV_B64", "").strip()
+
 # Các dòng cần có mỗi ngày trên Lark, đúng thứ tự hiển thị.
 # Tên kênh = giá trị cột "Kênh" trên Lark. (platform, channel) = để tìm page trong CSV.
 # None = không lấy từ Pancake, mặc định điền 0.
 DAILY_ROWS: list[tuple[str, tuple[str, str] | None]] = [
-    ("Không xác định",                          None),
+    ("Không xác định",                          ("id", ID_ZALO_DEME_UNIFORM)),   # = Lead của Zalo / Deme Uniform
     ("Shopee / Deme Uniform",                   ("shopee", "Deme Uniform")),
     ("Shopee / Đồng Phục In Theo Yêu Cầu DEME", ("shopee", "Đồng Phục In Theo Yêu Cầu DEME")),
     ("Tiktokshop / Deme Đồng Phục",             ("tiktokshop", "Deme Đồng Phục")),
@@ -47,13 +53,27 @@ SESSION = requests.Session()
 
 
 # ── PANCAKE HELPERS ─────────────────────────────────────────────
-def load_tokens(path: str) -> dict[tuple[str, str], tuple[str, str]]:
-    """{(platform, channel) viết thường: (page_id, access_token)}"""
-    result = {}
+def _read_csv_text(path: str) -> str:
+    """Ưu tiên secret PAGES_CONFIG_CSV_B64 (base64 của file CSV); không có thì đọc file CSV_FILE."""
+    if PAGES_CONFIG_CSV_B64:
+        try:
+            return base64.b64decode(PAGES_CONFIG_CSV_B64).decode("utf-8-sig")
+        except Exception as e:
+            raise RuntimeError(f"PAGES_CONFIG_CSV_B64 không giải mã được base64/UTF-8: {e}")
     with open(path, newline="", encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            key = ((row.get("platform") or "").strip().lower(), (row.get("channel") or "").strip().lower())
-            result[key] = ((row.get("page_id") or "").strip(), (row.get("access_token") or "").strip())
+        return f.read()
+
+
+def load_tokens(path: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """{(platform, channel) viết thường: (page_id, access_token)}; thêm {("id", page_id): (page_id, token)}"""
+    result = {}
+    for row in csv.DictReader(io.StringIO(_read_csv_text(path))):
+        page_id = (row.get("page_id") or "").strip()
+        token = (row.get("access_token") or "").strip()
+        key = ((row.get("platform") or "").strip().lower(), (row.get("channel") or "").strip().lower())
+        result[key] = (page_id, token)
+        if page_id:
+            result[("id", page_id.lower())] = (page_id, token)
     return result
 
 
