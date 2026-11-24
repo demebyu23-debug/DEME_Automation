@@ -33,7 +33,7 @@ PANCAKE_SHOP_ID = os.getenv("PANCAKE_SHOP_ID", "").strip()
 
 # ================== CẤU HÌNH ==================
 TU_NGAY = ""     # lấy đơn giao thành công từ ngày này (YYYY-MM-DD, giờ VN). "" = dùng SO_NGAY_QUET
-SO_NGAY_QUET = 3           # chỉ dùng khi TU_NGAY = "": quét đơn cập nhật trong N ngày gần nhất
+SO_NGAY_QUET = 10           # chỉ dùng khi TU_NGAY = "": quét đơn cập nhật trong N ngày gần nhất
 LOC_THE_VAT = True         # True = chỉ lấy đơn có thẻ VAT
 VAT_TAG_NAMES = ["VAT", "VAT cá nhân", "VAT công ty"]
 TAG_VAT_CA_NHAN = "VAT cá nhân"
